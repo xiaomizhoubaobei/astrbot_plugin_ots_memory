@@ -1,0 +1,62 @@
+{
+  "endpoint": {
+    "type": "string",
+    "description": "Tablestore Endpoint",
+    "hint": "表格存储实例公网或内网地址，如 https://Bot.cn-shanghai.tablestore.aliyuncs.com",
+    "default": ""
+  },
+  "instance_name": {
+    "type": "string",
+    "description": "实例名称",
+    "hint": "Tablestore 实例名称",
+    "default": ""
+  },
+  "region": {
+    "type": "string",
+    "description": "地域",
+    "hint": "实例所在地域，如 cn-shanghai、cn-beijing",
+    "default": "cn-shanghai"
+  },
+  "access_key_id": {
+    "type": "string",
+    "description": "AccessKey ID",
+    "hint": "阿里云账号或 RAM 用户的 AccessKey ID",
+    "default": ""
+  },
+  "access_key_secret": {
+    "type": "string",
+    "description": "AccessKey Secret",
+    "hint": "阿里云账号或 RAM 用户的 AccessKey Secret",
+    "default": ""
+  },
+  "memory_store_name": {
+    "type": "string",
+    "description": "Memory Store 名称",
+    "hint": "在 Tablestore 控制台或 CLI 中创建的记忆库名称",
+    "default": "huawu_memory"
+  },
+  "app_id": {
+    "type": "string",
+    "description": "Scope App ID",
+    "hint": "记忆隔离的命名空间 App ID",
+    "default": "astrbot"
+  },
+  "top_k": {
+    "type": "int",
+    "description": "检索条数",
+    "hint": "每次对话检索的相关记忆条数上限 (1-20)",
+    "default": 5
+  },
+  "min_score": {
+    "type": "float",
+    "description": "最低相关度分数",
+    "hint": "过滤低相关度记忆的阈值 (0.0 - 1.0)",
+    "default": 0.4
+  },
+  "auto_record": {
+    "type": "bool",
+    "description": "自动记录记忆",
+    "hint": "是否在对话结束时自动将本轮对话投递到记忆库沉淀",
+    "default": true
+  }
+}

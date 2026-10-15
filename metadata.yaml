@@ -1,0 +1,8 @@
+name: astrbot_plugin_ots_memory
+display_name: Tablestore 长期记忆
+short_desc: 基于阿里云表格存储 Memory Store 的跨会话长期记忆插件
+desc: 基于阿里云表格存储（Tablestore）Memory Store 的跨会话长期记忆插件。支持异步对话自动沉淀、语义向量混合检索及 Prompt 动态注入。
+version: 1.0.0
+author: 祁筱欣
+repo: https://cnb.cool/XMZZUZHI/Astrbot/astrbot_plugin_ots_memory
+astrbot_version: ">=4.0.0"
