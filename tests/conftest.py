@@ -18,9 +18,6 @@ from pathlib import Path
 _PACKAGE_NAME = "astrbot_plugin_ots_memory"
 # 仓库根目录（本文件位于 tests/ 下）
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-# 临时包视图的宿主目录
-_VIEW_ROOT = Path(tempfile.gettempdir()) / "ots-memory-test-view"
-
 _installed = False
 
 
@@ -30,13 +27,27 @@ def _ensure_package_view() -> None:
     if _installed:
         return
 
-    # 仓库目录本身已是该包名时，无需垫片
+    # 显式允许在测试中固定临时目录（CI/并发场景），默认每次运行取唯一目录，
+    # 避免多个进程/检出共用同一路径而互相覆盖包视图符号链接。
+    override = os.environ.get("OTS_TEST_VIEW_ROOT")
+    view_root = (
+        Path(override)
+        if override
+        else Path(tempfile.mkdtemp(prefix="ots-memory-test-view-"))
+    )
+
+    # 仓库目录本身已是该包名时（如 GitHub 检出目录名即包名），
+    # 直接让「仓库根的父目录」进 sys.path，使 `import <包名>` 命中该目录，
+    # 无需再垫一层符号链接。
     if _REPO_ROOT.name == _PACKAGE_NAME:
+        parent = str(_REPO_ROOT.parent)
+        if parent not in sys.path:
+            sys.path.insert(0, parent)
         _installed = True
         return
 
-    _VIEW_ROOT.mkdir(parents=True, exist_ok=True)
-    link = _VIEW_ROOT / _PACKAGE_NAME
+    view_root.mkdir(parents=True, exist_ok=True)
+    link = view_root / _PACKAGE_NAME
     if link.is_symlink() or link.exists():
         if link.is_symlink() or link.is_dir():
             try:
@@ -50,8 +61,8 @@ def _ensure_package_view() -> None:
         # 退化路径：不支持符号链接的环境（如部分 Windows 配置）用复制
         shutil.copytree(_REPO_ROOT, link, dirs_exist_ok=True)
 
-    if str(_VIEW_ROOT) not in sys.path:
-        sys.path.insert(0, str(_VIEW_ROOT))
+    if str(view_root) not in sys.path:
+        sys.path.insert(0, str(view_root))
     _installed = True
 
 

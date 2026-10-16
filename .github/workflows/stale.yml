@@ -11,7 +11,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
   actions: read
 
 jobs:
@@ -21,7 +20,6 @@ jobs:
     permissions:
       issues: write
       pull-requests: write
-      id-token: write
       actions: read
       contents: read
 
@@ -51,5 +49,9 @@ jobs:
             如果此拉取请求已不再需要，请手动关闭它。
 
             感谢您的贡献！
+          # 显式声明阈值：actions/stale 默认 days-before-stale 为 60，
+          # 与消息文案的「30天」不一致，此处按文案统一为 30 天。
+          days-before-stale: 30
+          days-before-close: 7
           stale-issue-label: '🔴 长时间无活动-议题'
           stale-pr-label: '🔴 长时间无活动-拉取请求'

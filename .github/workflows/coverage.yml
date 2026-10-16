@@ -19,13 +19,16 @@ concurrency:
 
 permissions:
   contents: read
-  id-token: write
   actions: read
 
 jobs:
   coverage:
     name: 单元测试与覆盖率
     runs-on: ubuntu-latest
+    # 令牌经 job 级 env 暴露给步骤的条件表达式（secrets 不能直接写在 if 中），
+    # 从而在 token 为空时安全跳过上报步骤。
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       # 安全加固：与仓库内其余全部工作流一致，内联 step-security/harden-runner。
       # 本工作流会在 PR（不可信来源）场景运行仓库自带测试代码，属高风险面，
@@ -38,6 +41,9 @@ jobs:
 
       - name: 检出代码
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # 本 job 会执行 PR 可控的测试代码，凭据不得留在本地 git 配置里被读取外泄
+          persist-credentials: false
 
       - name: 安装 Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -48,19 +54,18 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-asyncio coverage
-
-      # 仓库目录名不等于插件包名（astrbot_plugin_ots_memory），测试统一按
-      # 「顶层包名」导入（见 tests/conftest.py）。此处铺一层同名符号链接，
-      # 把仓库根暴露为包，使导入与覆盖率统计都能定位到真实源码行号。
-      - name: 构造可导入的包视图
-        run: ln -sfn "$GITHUB_WORKSPACE" "$RUNNER_TEMP/astrbot_plugin_ots_memory"
+          # 统一从 requirements-dev.txt 安装（含运行依赖 + 测试工具），
+          # 使 pytest/pytest-asyncio/coverage 纳入 Dependabot 跟踪范围。
+          pip install -r requirements-dev.txt
 
       - name: 运行测试并统计覆盖率
         env:
           # 覆盖率数据文件落到临时目录，避免污染工作区
           COVERAGE_FILE: ${{ runner.temp }}/.coverage
+          # 检出目录名即包名，其父目录（$GITHUB_WORKSPACE 的上一级）
+          # 加入 PYTHONPATH 后 `import astrbot_plugin_ots_memory` 才能命中；
+          # conftest.py 亦有等价兜底，此处显式声明以免依赖收集顺序。
+          PYTHONPATH: ${{ github.workspace }}/..
         run: |
           # --source 用「包名」计数，coverage 会以包所在目录为基准写出相对路径
           # （如 astrbot_plugin_ots_memory/client.py），从而正确定位到 GitHub
@@ -74,14 +79,10 @@ jobs:
       # 未配置 token 时跳过上报，仅留存 coverage.xml 工件，不使 CI 失败。
       - name: 上报覆盖率到 Codecov
         id: codecov
-        if: always()
+        # 仅当拿到 token 才上报；token 为空时跳过，避免空 token 触发失败
+        if: ${{ always() && env.CODECOV_TOKEN != '' }}
         continue-on-error: true
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
-        env:
-          # 官方推荐写法：令牌走环境变量而非 with.token（v5 起弃用）。
-          # 本仓库虽为公开仓库，但上传发生在受保护分支 main 上，
-          # 按 Codecov 规则仍需显式注入令牌。
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:
           files: ./coverage.xml
           flags: unittests
