@@ -61,7 +61,13 @@ jobs:
     # 且**不会把匹配到的明文密钥打印进 Actions 日志**。
     # 旧的 `git grep "password|secret|..."` 既不阻断（grep 命中即成功返回），
     # 又会把整行明文密钥输出到日志，等同于扩面泄漏，故整体替换。
+    #
+    # ⚠️ 这里**不能**再传 `--fail`：该 Action 的入口脚本本身已固定追加 `--fail`
+    # （见 action.yml 的 `trufflehog git ... --fail --no-update --github-actions`），
+    # 重复传入会让 CLI 直接报 `flag 'fail' cannot be repeated` 并以退出码 1 终止，
+    # 看起来像"扫到了密钥"，实则是参数冲突导致的**假失败**。
+    # 因此只保留 `--results=verified`，失败判定交给 Action 内置的 `--fail`。
     - name: 密钥扫描（trufflehog）
       uses: trufflesecurity/trufflehog@4dd8831c5f12599465d4d45c3c447b4018a34c85 # v3.97.9
       with:
-        extra_args: --results=verified --fail
+        extra_args: --results=verified
