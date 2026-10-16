@@ -17,11 +17,13 @@
 #       │  仅在**可信 ref**（默认分支或手动触发的本次 ref）上检出源码；      │
 #       │  只给 content-free 的只读审计能力；产出结构化审计结论 artifact。   │
 #       └──────────────────────────────────────────────────────────────────┘
-#                              ↓ audit-verdicts.json（数据）
+#                              ↓ audit-verdicts.json（**公钥加密后的密文** + 封装密钥）
 #       ┌─ publish job（唯一持 GH_PAT 的 job）──────────────────────────────┐
 #       │  不检出/不执行任何不可信源码；只消费 artifact 里的结构化结论。     │
 #       │  【协调披露】漏洞细节走**私密 security advisory**，公开 Issue 只   │
 #       │  留脱敏占位（指纹 + 告警编号），不在修复前暴露可利用细节。        │
+#       │  artifact 为**公钥加密的密文**：读权限者可下载但不可读，只有本    │
+#       │  job（持私钥）能解密 —— 交接全程不泄漏未修复漏洞细节。            │
 #       │  输入已被上游 schema 约束，无法注入。                              │
 #       └──────────────────────────────────────────────────────────────────┘
 #
@@ -41,6 +43,12 @@
 #                     · security_events 读权限 —— 读取本仓库 CodeQL 告警
 #                     · repo / issues 写权限   —— 创建公开跟踪 Issue 与私密安全公告
 #                     ⚠️ 仅注入 publish job（见下），triage job 绝不接触该 Secret。
+#   - AUDIT_HANDOFF_PRIVATE_KEY
+#                     必填（启用加密交接后），与仓库内 ai-audit/handoff-public-key.pem
+#                     **配对的 RSA 私钥**（PEM 全文）。triage 用**公钥**加密结论后
+#                     才上传 artifact，本 Secret 仅注入 publish job 用于解密。
+#                     ⚠️ 生成方式见 ai-audit/README.md「加密交接」一节；公钥为公开
+#                        信息可随仓库提交，私钥**只能**经 Secret 注入、严禁入库。
 #   - MCP_CONFIG      可选，MCP Server（GitHub API）配置
 #
 # ⚠️ 注意：
@@ -182,23 +190,64 @@ jobs:
           hatch run main -t ai_audit.alert_triage_example \
               -g repo="${{ github.repository }}" \
               -m ai_audit.model_config
-          # 兜底：若 taskflow 未产出结论文件，写一个空数组，保证 artifact 存在
+          # 兜底：若 taskflow 未产出结论文件，写一个空数组，保证后续步骤有输入
           [ -f "$AUDIT_VERDICT_FILE" ] || echo '[]' > "$AUDIT_VERDICT_FILE"
 
-      # 上传审计结论（纯数据），交给下游持令牌的 publish job。
-      # 仅上传结论 JSON，不上传任何可执行产物，避免下游执行不可信代码。
-      - name: 上传审计结论 artifact
+      # ── 加密结论（协调披露的关键一步） ─────────────────────────────────────
+      # 威胁：artifact 会被平台**持久化，且任何拥有仓库读权限的人都能下载**
+      #       （公开仓库 = 任何互联网读者）。而 verdict 里含 `report` 全文、
+      #       `rule`、`path` —— 正是本工作流刻意**不**放进公开 Issue 的未修复漏洞细节。
+      #       若明文上传，等于把「私密 advisory」里的细节经由 artifact 泄成公开可读，
+      #       彻底架空 SECURITY.md 的协调披露设计。
+      # 对策：在上传前用**公钥（非机密）**做混合加密（AES-256-CBC 加密数据 +
+      #       RSA-OAEP-SHA256 封装随机数据密钥），只上传密文。公钥可就地提交、
+      #       无需注入任何 Secret —— **triage job 因此保持零凭据**（安全墙不削弱）。
+      #       唯一能解密的是持私钥的 publish job（私钥经 Secret 注入）。
+      # 顺带收益：密文对读权限所有者不可读，且密文不可执行，下游仍只消费数据。
+      - name: 加密审计结论（公钥混合加密，仅上传密文）
+        env:
+          # 公钥随仓库提交（公开信息），triage 不接触任何 Secret
+          AUDIT_HANDOFF_PUBLIC_KEY: ${{ github.workspace }}/ai-audit/handoff-public-key.pem
+        run: |
+          set -euo pipefail
+          : "${AUDIT_HANDOFF_PUBLIC_KEY:?缺少公钥路径}"
+          test -f "$AUDIT_HANDOFF_PUBLIC_KEY" \
+            || { echo "公钥文件不存在：$AUDIT_HANDOFF_PUBLIC_KEY" >&2; exit 1; }
+          # 1) 生成一次性 32 字节数据密钥（CSPRNG），仅存在于本次 runner 内存/临时盘
+          umask 077
+          KEY="$(mktemp)"
+          openssl rand -out "$KEY" 32
+          # 2) 用数据密钥对结论做 AES-256-CBC + PBKDF2 加密（salt 由 openssl 随机生成）
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
+            -in /tmp/audit-verdicts.json -out /tmp/audit-verdicts.json.enc -pass file:"$KEY"
+          # 3) 用**公钥**（RSA-OAEP-SHA256）封装数据密钥，随密文一起交付
+          openssl pkeyutl -encrypt -pubin -inkey "$AUDIT_HANDOFF_PUBLIC_KEY" \
+            -in "$KEY" -out /tmp/audit-verdicts.key.enc \
+            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
+          # 4) 清除明文与明文密钥，避免误上传
+          shred -u /tmp/audit-verdicts.json "$KEY" 2>/dev/null || { rm -f /tmp/audit-verdicts.json "$KEY"; }
+          echo "已加密：仅上传 audit-verdicts.json.enc 与 audit-verdicts.key.enc（密文 + 封装密钥）"
+
+      # 上传审计结论（**密文**），交给下游持令牌与私钥的 publish job。
+      # 仅上传加密后的纯数据，不上传任何可执行产物，避免下游执行不可信代码。
+      - name: 上传加密后的审计结论 artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: audit-verdicts
-          path: /tmp/audit-verdicts.json
+          path: |
+            /tmp/audit-verdicts.json.enc
+            /tmp/audit-verdicts.key.enc
           if-no-files-found: error
+          # 进一步缩短留存期，降低密文在平台上被长期留存的暴露面
+          retention-days: 7
 
   # ---------------------------------------------------------------------------
   # Job 2：发布（唯一持有 GH_PAT 的 job）
   # ---------------------------------------------------------------------------
-  # 本 job 的输入只有上游 artifact（结构化 JSON），字段受白名单约束，因此即便
+  # 本 job 的输入是上游 artifact（结构化 JSON），字段受白名单约束，因此即便
   # artifact 内容被污染，也无法注入工作流或命令；它不检出/不执行任何仓库源码。
+  # ⚠️ 该 artifact 已在 triage 侧用**公钥混合加密**，本 job 用私钥（Secret 注入）
+  #    解密后才消费：读权限者即使下载了 artifact 也只能拿到密文，无法读取漏洞细节。
   publish:
     name: 创建 Issue（持令牌）
     needs: triage
@@ -214,11 +263,45 @@ jobs:
         with:
           egress-policy: audit
 
-      - name: 下载审计结论 artifact
+      - name: 下载加密后的审计结论 artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: audit-verdicts
           path: /tmp/audit
+
+      # ── 解密审计结论（协调披露的收口） ─────────────────────────────────────
+      # artifact 里只有密文（见 triage job 的加密步骤）；只有本 job 经 Secret 拿到私钥，
+      # 是**唯一**能把内容变回可读的一方 —— 这正是「为发布者加密」的落地。
+      # 若 Secret 缺失或密钥不匹配：明确失败，绝不退化成「明文放行」。
+      - name: 解密审计结论（私钥仅本 job 持有）
+        env:
+          AUDIT_HANDOFF_PRIVATE_KEY: ${{ secrets.AUDIT_HANDOFF_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          : "${AUDIT_HANDOFF_PRIVATE_KEY:?请配置仓库 Secret AUDIT_HANDOFF_PRIVATE_KEY（与 ai-audit/handoff-public-key.pem 配对的私钥），否则无法解密审计结论}"
+          test -f /tmp/audit/audit-verdicts.json.enc \
+            || { echo "缺少密文 audit-verdicts.json.enc" >&2; exit 1; }
+          test -f /tmp/audit/audit-verdicts.key.enc \
+            || { echo "缺少封装密钥 audit-verdicts.key.enc" >&2; exit 1; }
+          umask 077
+          # 把私钥落到临时文件（Secret 不入命令行，避免进程列表泄漏）
+          KEYFILE="$(mktemp)"
+          printf '%s\n' "$AUDIT_HANDOFF_PRIVATE_KEY" > "$KEYFILE"
+          # 1) 用私钥解出数据密钥（RSA-OAEP-SHA256）
+          DATAKEY="$(mktemp)"
+          openssl pkeyutl -decrypt -inkey "$KEYFILE" \
+            -in /tmp/audit/audit-verdicts.key.enc -out "$DATAKEY" \
+            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
+          # 2) 用数据密钥解出结论明文
+          openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+            -in /tmp/audit/audit-verdicts.json.enc \
+            -out /tmp/audit/audit-verdicts.json -pass file:"$DATAKEY"
+          # 3) 立即清除私钥临时文件与数据密钥
+          shred -u "$KEYFILE" "$DATAKEY" 2>/dev/null || rm -f "$KEYFILE" "$DATAKEY"
+          # 4) 防御：解密结果必须是合法 JSON 数组（与旧版行为一致）
+          jq -e 'type == "array"' /tmp/audit/audit-verdicts.json > /dev/null \
+            || { echo "解密后的结论不是 JSON 数组，拒绝继续" >&2; exit 1; }
+          echo "解密完成，结论条数：$(jq 'length' /tmp/audit/audit-verdicts.json)"
 
       # ── 非智能体门禁（deterministic gate） ──────────────────────────────────
       # 本 step 是「是否创建 Issue」的**唯一**放行点，且**全程不含任何 LLM**：

@@ -43,12 +43,20 @@ LLM + Taskflow Agent 逐个审计
 > 原「⑥ 知识回流」因无法在创建 Issue 后立即获得人工反馈而被移除（见文末“为什么没有知识回流”）。
 
 > 🔒 **安全设计：审计与创建 Issue 分离（pwn-request 防护）**
-> `ai-audit-scheduled.yml` 把流程拆成**两个 job**，中间只以 **artifact（纯数据）** 传信：
+> `ai-audit-scheduled.yml` 把流程拆成**两个 job**，中间只以 **artifact（加密后的纯数据）** 传信：
 > - `triage` job：**不持有任何仓库写凭据**（无 `GH_PAT`），仅在**可信 ref**（手动触发的本次 ref
 >   或默认分支）上检出源码，产出结论文件 `audit-verdicts.json`；
 > - `publish` job：**唯一持有 `GH_PAT` 的 job**，**不检出/不执行任何源码**，只消费 artifact 里
 >   的结构化结论按白名单字段建 Issue。
 >
+> 🔐 **artifact 必须加密交接（协调披露的关键）**：`audit-verdicts.json` 里含 `report` 全文、
+> `rule`、`path` —— 正是本工作流刻意**不**放进公开 Issue 的未修复漏洞细节。而 Actions artifact
+> 会被持久化，且**任何拥有仓库读权限的人都能下载**（公开仓库 = 任何互联网读者）。若明文上传，
+> 等于把私密 advisory 里的细节经 artifact 泄成公开可读，彻底架空协调披露设计。
+> 因此 `triage` 在上传前用**公钥**做混合加密（AES-256-CBC 加密数据 + RSA-OAEP-SHA256 封装随机
+> 数据密钥），**只上传密文**；`publish` 用**私钥**（Secret 注入）解密后才消费。
+> 这既堵住泄漏，又**不削弱「triage 零凭据」这道安全墙**——公钥是公开信息，可随仓库提交。
+
 > 之所以必须这样拆：`workflow_run` 会为 **PR（含 fork）触发的 CodeQL 运行**也开火，而 PR 源码
 > 由提交者控制；若让持令牌的 job 同时执行 PR 源码，fork 提交者即可借 PR 改写审计模板，
 > 驱动 agent 拿高权限 PAT 发文（典型 pwn-request）。因此本工作流还有两道源头门禁：
@@ -242,6 +250,7 @@ hatch run main -t ai_audit.alert_triage_example \
 | `AI_API_TOKEN` | ✅ | 对应厂商的 API Key（需支持函数调用） |
 | `AI_MODEL_NAME` | ✅ | 实际调用的模型名（如 `deepseek-v4-flash` / `qwen-max` / `kimi-k2` 等）。工作流运行时将其透传给框架的 `COPILOT_DEFAULT_MODEL` 环境变量 |
 | `GH_PAT` | ✅ | GitHub PAT，需 `repo/issues` 写权限（创建真实 Issue）。**仅注入 `publish` job**，`triage` job 绝不接触该 Secret |
+| `AUDIT_HANDOFF_PRIVATE_KEY` | ✅ | 与仓库内 `ai-audit/handoff-public-key.pem` **配对的 RSA 私钥**（PEM 全文，见下方「加密交接」）。**仅注入 `publish` job** 用于解密；`triage` 只用公钥，不接触私钥 |
 | `MCP_CONFIG` | 可选 | MCP Server（GitHub API）配置 |
 
 > 📌 框架只识别 `AI_API_ENDPOINT` / `AI_API_TOKEN`（即 `AsyncOpenAI(base_url=..., api_key=...)`），
@@ -255,6 +264,33 @@ hatch run main -t ai_audit.alert_triage_example \
 > 因此即便审计对象被污染，也无凭据可被滥用。
 
 > 首次使用建议先 `workflow_dispatch` 手动跑一次，确认链路正常后再依赖自动触发。
+
+#### 加密交接：生成密钥对并注入私钥
+
+`triage` → `publish` 之间以 artifact 传信，且 artifact 对**任何有读权限的人**可下载，
+故必须**加密交接**。做法是「公钥随仓库提交、私钥只进 Secret」：
+
+```bash
+# 1) 生成 RSA 密钥对（3072 位；私钥保密，公钥公开）
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out handoff-private.pem
+openssl rsa -in handoff-private.pem -pubout -out handoff-public.pem
+
+# 2) 用你的公钥替换仓库内占位公钥，并提交
+cp handoff-public.pem ai-audit/handoff-public-key.pem
+git add ai-audit/handoff-public-key.pem && git commit -m "chore(ai-audit): 更新加密交接公钥"
+
+# 3) 把【私钥全文】设为仓库 Secret：Settings → Secrets and variables → Actions →
+#    新建 AUDIT_HANDOFF_PRIVATE_KEY，粘贴 handoff-private.pem 全文
+# 4) 私钥用完即删（绝不入库）
+shred -u handoff-private.pem 2>/dev/null || rm -f handoff-private.pem
+```
+
+- 🔐 **公钥可以公开**（它只能加密，不能解密），因此 `triage` 读它**无需任何 Secret**，
+  「triage 零凭据」的安全墙得以保持。
+- 🔑 **私钥只能经 Secret 注入**，且**只注入 `publish` job**；严禁写进仓库、日志或评论。
+- ♻️ **轮换**：怀疑私钥泄漏时，重新生成密钥对 → 更新仓库公钥 → 更新 Secret 私钥即可；
+  旧密文因留存期短（`retention-days: 7`）会自然过期。
+- 若 `AUDIT_HANDOFF_PRIVATE_KEY` 未配置，`publish` job 会**明确失败**（而非降级为明文放行）。
 
 ### 方式二：把 `ai_audit` 作为可导入包安装
 

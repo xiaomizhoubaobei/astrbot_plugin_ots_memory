@@ -1,2 +1,7 @@
 *.pyc
 __pycache__/
+
+# 加密交接私钥：绝不入库（公钥 handoff-public-key.pem 可提交，私钥不可）
+*.pem
+!.pem-public
+!ai-audit/handoff-public-key.pem
