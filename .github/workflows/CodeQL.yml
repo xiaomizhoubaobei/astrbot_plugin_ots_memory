@@ -14,8 +14,9 @@ on:
   workflow_dispatch:
 
 permissions:
+  # 最小权限：无 OIDC 联邦/云身份需求，**不授予** id-token: write——
+  # 否则一旦某个 action 被替换，攻击者可凭空铸造云身份令牌（多余武器）。
   contents: read
-  id-token: write
   actions: read
 
 jobs:
@@ -25,28 +26,20 @@ jobs:
     permissions:
       actions: read
       contents: read
+      # 仅上传 CodeQL 结果需要 security-events: write；同样不需要 id-token。
       security-events: write
-      id-token: write
 
     strategy:
       fail-fast: false
-      # 多矩阵：语言 × 操作系统。
-      # CodeQL 的查询结果与语言强相关，与本机 Python 版本弱相关，
-      # 故 Python 版本仅在 Linux（主运行器）上做多版本覆盖，避免矩阵规模翻倍。
+      # CodeQL 的 Python 查询结果与**操作系统 / Python 版本基本无关**（它做的是
+      # 源码级数据流分析，不做跨版本运行时覆盖）。此前用 os × python-version 的
+      # 组合矩阵（5 个组合）只会把同一份分析重复跑 5 次、各自上传一个 category，
+      # 徒增 CI 成本而**不增加分析覆盖**。故收敛为**单一运行器 + 单一版本**；
+      # 若确需验证多环境运行时行为，请另建独立的测试矩阵，而非塞进 CodeQL。
       matrix:
         language: [ 'python' ]
-        os: [ 'ubuntu-latest', 'windows-latest', 'macos-latest' ]
-        python-version: [ '3.12', '3.13', '3.14' ]
-        exclude:
-          # 非 Linux 运行器只需最小编译/解析环境，不重复跑多版本
-          - os: 'windows-latest'
-            python-version: '3.12'
-          - os: 'windows-latest'
-            python-version: '3.13'
-          - os: 'macos-latest'
-            python-version: '3.12'
-          - os: 'macos-latest'
-            python-version: '3.13'
+        os: [ 'ubuntu-latest' ]
+        python-version: [ '3.12' ]
 
     steps:
     - name: 加固运行器（审计所有出站调用）
@@ -77,5 +70,5 @@ jobs:
     - name: 执行 CodeQL 分析
       uses: github/codeql-action/analyze@5d4e8d1aca955e8d8589aabd499c5cae939e33c7 # v4.31.9
       with:
-        # 同一语言的不同矩阵组合需用独立 category，避免结果互相覆盖
-        category: "/language:${{ matrix.language }}/os:${{ matrix.os }}/py:${{ matrix.python-version }}"
+        # 单一组合下 category 只需按语言区分；保留语言维度便于未来扩展多语言
+        category: "/language:${{ matrix.language }}"

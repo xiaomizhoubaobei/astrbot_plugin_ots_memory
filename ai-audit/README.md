@@ -39,23 +39,27 @@ LLM + Taskflow Agent 逐个审计
 > 第 ⑤ 步只会在读到 `_verdict.status == APPROVED` 且 `_report` 存在时才落地结论，
 > 下游持令牌的 `publish` job 再用纯 shell（`jq`）**只挑 `status == "APPROVED"` 的条目**建 Issue，结论同时落盘为 `audit-verdicts.json` 留档。
 >
-> ⚖️ **确定性边界（重要，勿过度宣称）**：`_verdict` 的**内容**由第 ④ 步的 **LLM** 判定（该告警是不是真实漏洞，属模型判断，不保证永远正确）；示例能**确定性保证**的是「结论 → 发文」这段把关属**非智能体门禁**——第 ⑤ 步与 `publish` job 都只认 `status == "APPROVED"` 字段，且二者均为纯 shell（`jq`/`curl`）、**不含任何 LLM 环节**。因此准确的表述是「**凡 `_verdict.status` 被写成非 APPROVED 的告警，机制上不可能被创建 Issue**」，而**不是**「被驳回的误报绝无可能被创建」（后者取决于模型判定本身是否可靠）。
+> ⚖️ **确定性边界（重要，勿过度宣称）**：`_verdict` 的**内容**由第 ④ 步的 **LLM** 判定（该告警是不是真实漏洞，属模型判断，不保证永远正确）；示例能**确定性保证**的是「结论 → 发文」这段把关属**非智能体门禁**——第 ⑤ 步与 `publish` job 都只认 `status == "APPROVED"` 字段，且二者均为纯 shell（`jq`/`curl`）、**不含任何 LLM 环节**；`publish` 还会**回查权威 CodeQL 告警**核对 `alert_number`/`rule`/`path` 后才建资源。因此准确的表述是「**凡 `_verdict.status` 被写成非 APPROVED、或与本仓库 CodeQL 告警对不上的条目，机制上不可能被创建 Issue**」，而**不是**「被驳回的误报绝无可能被创建」（后者取决于模型判定本身是否可靠）。
 > 原「⑥ 知识回流」因无法在创建 Issue 后立即获得人工反馈而被移除（见文末“为什么没有知识回流”）。
 
 > 🔒 **安全设计：审计与创建 Issue 分离（pwn-request 防护）**
 > `ai-audit-scheduled.yml` 把流程拆成**两个 job**，中间只以 **artifact（加密后的纯数据）** 传信：
-> - `triage` job：**不持有任何仓库写凭据**（无 `GH_PAT`），仅在**可信 ref**（手动触发的本次 ref
->   或默认分支）上检出源码，产出结论文件 `audit-verdicts.json`；
+> - `triage` job：**不持有任何仓库写凭据**（无 `GH_PAT`），只在**默认分支**上检出源码
+>   （手动触发也不例外，绝不使用 `github.ref`），产出结论文件 `audit-verdicts.json`；
 > - `publish` job：**唯一持有 `GH_PAT` 的 job**，**不检出/不执行任何源码**，只消费 artifact 里
->   的结构化结论按白名单字段建 Issue。
+>   的结构化结论按白名单字段建 Issue；且建任何资源前会**用只读 API 回查告警来源**
+>   （按 `alert_number` 核对 `rule`/`path`），拒绝非本仓库 CodeQL 告警的伪造结论。
 >
 > 🔐 **artifact 必须加密交接（协调披露的关键）**：`audit-verdicts.json` 里含 `report` 全文、
 > `rule`、`path` —— 正是本工作流刻意**不**放进公开 Issue 的未修复漏洞细节。而 Actions artifact
 > 会被持久化，且**任何拥有仓库读权限的人都能下载**（公开仓库 = 任何互联网读者）。若明文上传，
 > 等于把私密 advisory 里的细节经 artifact 泄成公开可读，彻底架空协调披露设计。
-> 因此 `triage` 在上传前用**公钥**做混合加密（AES-256-CBC 加密数据 + RSA-OAEP-SHA256 封装随机
-> 数据密钥），**只上传密文**；`publish` 用**私钥**（Secret 注入）解密后才消费。
-> 这既堵住泄漏，又**不削弱「triage 零凭据」这道安全墙**——公钥是公开信息，可随仓库提交。
+> 因此 `triage` 在上传前用**公钥**做混合加密 + **加密后认证**（encrypt-then-MAC）：
+> 数据密钥/MAC 密钥均为**十六进制可打印串**（避免 raw 二进制经 `-pass file:` 被换行截断成空口令），
+> 用数据密钥做 AES-256-CBC 加密，再用独立 MAC 密钥对**密文**做 HMAC-SHA256（`openssl enc` 不支持
+> AEAD，故用 encrypt-then-MAC 等效达成「篡改即拒绝」），两枚密钥一并经 RSA-OAEP-SHA256 封装；
+> **只上传密文 + 封装密钥 + HMAC**。`publish` 用**私钥**（Secret 注入）解出密钥、**先验 HMAC 再解密**
+> 后才消费。这既堵住泄漏，又**不削弱「triage 不持仓库写凭据」这道安全墙**——公钥是公开信息，可随仓库提交。
 
 > 之所以必须这样拆：`workflow_run` 会为 **PR（含 fork）触发的 CodeQL 运行**也开火，而 PR 源码
 > 由提交者控制；若让持令牌的 job 同时执行 PR 源码，fork 提交者即可借 PR 改写审计模板，
@@ -114,7 +118,7 @@ ai-audit/
 | `seclab-taskflow-agent` 框架 | 需部署框架本体 | ❌ 需部署 |
 | LLM 模型（支持函数调用） | 任意 OpenAI 兼容上游：DeepSeek / 通义千问 / Moonshot / 本地 vLLM 等 | ❌ 需配置（`AI_API_ENDPOINT` + `AI_API_TOKEN`） |
 | GitHub PAT（读告警） | 审计侧只读拉取 CodeQL 告警用（`security_events` 读权限即可） | ❌ 需你提供 |
-| GitHub PAT（写 Issue） | 仅 `publish` job 创建真实 Issue 用（`repo/issues` 写权限） | ❌ 需你提供 |
+| GitHub PAT（写 Issue） | 仅 `publish` job 创建真实 Issue 与私密公告用（`issues` 写 + `repository_advisories:write`；细分令牌还需管理员/安全经理角色） | ❌ 需你提供 |
 | MCP Server（GitHub API） | 框架可选的信息收集能力（只读） | ⭕ 可选 |
 
 ---
@@ -248,6 +252,12 @@ hatch run main -t ai_audit.alert_triage_example \
   🔒 **fork 门禁**：仅当上游运行的 `head_repository` 为本仓库时才进入审计，fork PR 触发的
   CodeQL 运行一律跳过，从源头杜绝把 PR 源码当作不可信输入送进审计链。
 - **手动触发**：在仓库 **Actions → AI 审计（CodeQL 完成后自动分流）→ Run workflow** 手动跑一次用于验证。
+  🔒 手动触发有两道闸：① 仅在**默认分支**上放行，且 checkout 的 ref **固定为默认分支**
+  （不用 `github.ref`），故手选其它分支也不会把未审分支的源码送进审计链；
+  ② `publish` job 绑定受保护 `environment`（`ai-audit-publish`，需配 required reviewers），
+  持令牌发文会**暂停等待人工审批**。
+  ⚠️ 部署前请在 **Settings → Environments** 建好同名环境并配置审批人，否则 `publish` 会因
+  环境不存在而失败。
 
 **所需 Secrets**（仓库 **Settings → Secrets and variables → Actions**）：
 
@@ -256,7 +266,7 @@ hatch run main -t ai_audit.alert_triage_example \
 | `AI_API_ENDPOINT` | ✅ | 上游 base_url（OpenAI 兼容口，如 `https://api.deepseek.com/v1`，或本地 vLLM / Ollama 的 OpenAI 兼容地址） |
 | `AI_API_TOKEN` | ✅ | 对应厂商的 API Key（需支持函数调用） |
 | `AI_MODEL_NAME` | ✅ | 实际调用的模型名（如 `deepseek-v4-flash` / `qwen-max` / `kimi-k2` 等）。工作流运行时将其透传给框架的 `COPILOT_DEFAULT_MODEL` 环境变量 |
-| `GH_PAT` | ✅ | GitHub PAT，需 `repo/issues` 写权限（创建真实 Issue）。**仅注入 `publish` job**，`triage` job 绝不接触该 Secret |
+| `GH_PAT` | ✅ | GitHub PAT。需同时具备：`security_events` 读（读 CodeQL 告警）、`issues` 写（建公开 Issue）、**`repository_advisories:write`**（建私密安全公告）。细分令牌需**同时持有该权限与仓库管理员/安全经理角色**，或改用 classic PAT（`repo` scope 且账号为管理员/安全经理）。**仅注入 `publish` job**，`triage` job 绝不接触该 Secret |
 | `AUDIT_HANDOFF_PRIVATE_KEY` | ✅ | 与仓库内 `ai-audit/handoff-public-key.pem` **配对的 RSA 私钥**（PEM 全文，见下方「加密交接」）。**仅注入 `publish` job** 用于解密；`triage` 只用公钥，不接触私钥 |
 | `MCP_CONFIG` | 可选 | MCP Server（GitHub API）配置 |
 
@@ -293,11 +303,17 @@ shred -u handoff-private.pem 2>/dev/null || rm -f handoff-private.pem
 ```
 
 - 🔐 **公钥可以公开**（它只能加密，不能解密），因此 `triage` 读它**无需任何 Secret**，
-  「triage 零凭据」的安全墙得以保持。
+  「triage 不持仓库写凭据」的安全墙得以保持（它仍需调用 LLM 的 `AI_API_TOKEN` 与只读
+  `GITHUB_TOKEN`，但这些都不具备仓库写能力）。
 - 🔑 **私钥只能经 Secret 注入**，且**只注入 `publish` job**；严禁写进仓库、日志或评论。
-- ♻️ **轮换**：怀疑私钥泄漏时，重新生成密钥对 → 更新仓库公钥 → 更新 Secret 私钥即可；
-  旧密文因留存期短（`retention-days: 7`）会自然过期。
+- ♻️ **轮换**：公钥（入库）与私钥（Secret）是**分两步更新**的，中间存在窗口期——
+  若此刻恰好有 workflow 正在跑，它会用「**旧公钥加密、新私钥解密**」而无法解开，导致发布失败。
+  因此正确顺序是：**先暂停触发并等待现有运行完成** → 再更新仓库公钥 → 再更新 Secret 私钥 →
+  **验证新密钥配对**（跑一次成功解密）→ 恢复触发。旧密文因留存期短（`retention-days: 7`）
+  会自然过期。
 - 若 `AUDIT_HANDOFF_PRIVATE_KEY` 未配置，`publish` job 会**明确失败**（而非降级为明文放行）。
+- 🔏 **完整性**：`triage` 侧在加密后对密文再做 HMAC-SHA256（encrypt-then-MAC），
+  `publish` 侧**先验 HMAC 再解密**——密文被篡改即拒绝，不以「是不是 JSON 数组」充当完整性校验。
 
 ### 方式二：把 `ai_audit` 作为可导入包安装
 
@@ -330,21 +346,27 @@ shred -u handoff-private.pem 2>/dev/null || rm -f handoff-private.pem
   （不能在 shell 里调 MCP 工具、也不能用 `{{ result.* }}`，详见第三节）。
 - **分页拉取**：`alerts` 任务逐页拉取全部 open 的 CodeQL 告警，仓库告警超过 100 条也不会漏审。
 - **防幻觉校验**：报告不完整/不一致直接驳回（`_verdict=REJECTED`），避免 LLM 编造漏洞。
-- **审计与发文隔离**：taskflow 只产出结论文件；Issue 由独立持令牌 job 消费结论创建
-  （标题带 `[AI审计]` 前缀，并打 `bug`/`security`/`ai-audit` 标签），且仅对
-  `_verdict.status == APPROVED` 的告警执行——不可信输入与高权限动作分处两个 job。
+- **审计与发文隔离**：taskflow 只产出结论文件；Issue 由独立持令牌 job 消费结论创建。
+  为遵守协调披露，公开 Issue 仅作**脱敏占位**：
+  - **标题**：`[AI审计] CodeQL 告警 #<alert_number>`（**不含** rule/path）；
+  - **标签**：仅 `security` 与 `ai-audit`（**没有** `bug`）；
+  - **正文**：只有告警编号 + 「私密详情见 security advisory `<ghsa_id>`」+ 处置约定，
+    rule / path / report 全文一律不放公开渠道，而是写进**私密 security advisory**。
+  且仅对 `_verdict.status == APPROVED` 的告警执行——不可信输入与高权限动作分处两个 job。
   ⚖️ 注意边界：**「结论 → 发文」的把关是非智能体的确定性 shell 门禁**（只认 APPROVED 字段、
   无 LLM 参与），但 **`_verdict` 本身是 LLM 判定**。故此处只能承诺「非 APPROVED 的告警不会
   被创建 Issue」，**不能**承诺「模型判定错误（误报被误判为 TP/APPROVED）也不会被创建」。
 - **发文幂等 + 并发自愈（防重复 Issue）**：CodeQL 在 push / PR / schedule 多入口下可能
   **并发完成**，从而同时拉起多个本工作流实例；若两个 `publish` 同时走到「先查是否存在、
   再创建」的判定点，就会双双读到「不存在」→ 双双创建 → 同一漏洞出现两条 Issue。为此：
-  1. **工作流级 `concurrency`**：`group: ${{ github.workflow }}` + `cancel-in-progress: false`，
-     把所有触发源的实例收敛到**同一条队列**串行执行，从源头掐掉并发（不掺 `github.ref`，
-     否则不同 ref 的实例会落入不同队列、竞态依旧）。
+  1. **工作流级 `concurrency`**：`group: ${{ github.workflow }}` + `cancel-in-progress: false`
+     + `queue: max`，把所有触发源的实例收敛到**同一条队列**串行执行，从源头掐掉并发
+     （不掺 `github.ref`，否则不同 ref 的实例会落入不同队列、竞态依旧；仅设
+     `cancel-in-progress: false` 会「替换待跑实例」，需 `queue: max` 才真正**排队不丢单**）。
   2. **指纹去重**：正文首部写入 `<!-- ai-audit-alert:<alert_number> -->`（HTML 注释，用户不可见），
-     以 **`alert_number`** 而非标题作幂等判据——标题是 `[AI审计] <rule> - <path>`，同 rule+path
-     的不同告警会撞标题（误合并），同告警标题微调又会漏判（漏合并）。
+     以 **`alert_number`** 而非标题作幂等判据——标题是 `[AI审计] CodeQL 告警 #<alert_number>`，
+     单靠标题匹配易漏判/误判；告警编号是唯一稳定锚点。私密公告同样按**完整标题精确相等**
+     去重（不可用 `contains`，否则 `#1` 会误命中 `#10`）。
   3. **全量翻页**：去重检索**逐页遍历全部 open Issue**，而非只取 `?per_page=100` 首页——
      仓库 open Issue 超 100 条时，排在其后的既有 Issue 会被漏查而重复创建。
   4. **创建后自愈（TOCTOU 兜底）**：创建后立即复查同指纹；若临界区里对方已抢先建过，
@@ -366,7 +388,9 @@ shred -u handoff-private.pem 2>/dev/null || rm -f handoff-private.pem
 
 ---
 
-> 🔒 安全模型说明：本工作流已按「不可信输入与高权限动作隔离」原则改造——审计 job 无凭据、
+> 🔒 安全模型说明：本工作流已按「不可信输入与高权限动作隔离」原则改造——审计 job
+> **不持有任何仓库写凭据**（它仍需 `GH_PAT` 之外的 `AI_API_TOKEN` 调用 LLM、
+> 以及一枚**只读** `GITHUB_TOKEN` 读告警，因此准确说法是「无仓库写凭据」而**不是**「无凭据」）、
 > 发文 job 不落地源码，两者以 artifact 传信，并在 `workflow_run` 上加了 fork 门禁，
 > 用于消除「fork PR 源码 → 持 GH_PAT 的 AI agent」这一提权路径。
 >
