@@ -222,11 +222,11 @@ jobs:
           # 兜底：若 taskflow 未产出结论文件，写一个空数组，保证后续步骤有输入
           [ -f "$AUDIT_VERDICT_FILE" ] || echo '[]' > "$AUDIT_VERDICT_FILE"
 
-      # ── 空结论短路（triage 侧）：零告警时**不产出任何密文** ───────────────
+      # ── 空结论短路（triage 侧）：无 APPROVED 结论时**不产出任何密文** ──────
       # 成因：taskflow 在**无 APPROVED 结论**时也会正常收尾，兜底逻辑会把
       #      `/tmp/audit-verdicts.json` 写成 `[]`。若照旧加密并上传，下游 publish
       #      job 拿到的是「合法密文（明文为空数组）」——它**无从判断内容是否为空**，
-      #      只能照常解密，于是零告警的运行仍会去撞 `AUDIT_HANDOFF_PRIVATE_KEY`：
+      #      只能照常解密，于是无 APPROVED 结论的运行仍会去撞 `AUDIT_HANDOFF_PRIVATE_KEY`：
       #      首次部署尚未配密钥时 publish 会**硬失败**（"CodeQL 跑完 → AI 审计红了"），
       #      却是「毫无可发布内容」，把配置缺失误报成链路故障。
       # 对策：在这里就用**确定性外壳检查**判空（`jq 'length'`），并把结论**显式**外化
@@ -236,7 +236,7 @@ jobs:
       #      publish 侧据此在**任何密码学操作之前**短路跳过，与私钥是否配置解耦。
       # 安全边界不变：判空只看「条数」，不解析、不放宽任何完整性要求；确有内容时
       #      仍严格走「配对自检 → 验 HMAC → 解密 → 数组格式校验」。
-      - name: 判空并写入空结论标记（零告警时不产出密文）
+      - name: 判空并写入空结论标记（无 APPROVED 结论时不产出密文）
         id: emptiness
         run: |
           set -euo pipefail
@@ -314,7 +314,7 @@ jobs:
       # ⚠️ 上传路径是**互斥**的两条分支（见上一步的 `empty` 输出）：
       #    · 非空 → 上传密文三件套（.enc/.key.enc/.mac）；
       #    · 空   → 只上传空结论标记 audit-verdicts.empty（**不含任何密文**）。
-      #      正因如此，零告警运行时 artifact 里根本不存在 `.enc`，publish 侧
+      #      正因如此，无 APPROVED 结论运行时 artifact 里根本不存在 `.enc`，publish 侧
       #      的判空短路无论如何都会命中，无需（也不应）依赖私钥。
       - name: 上传加密后的审计结论 artifact（空结论时只上传标记）
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -375,7 +375,7 @@ jobs:
       #    既误导排查、又把「首次部署尚未配密钥」误报成链路故障。
       #    故此处先用**确定性外壳检查**判空——它不碰私钥，与 Secret 是否配置无关。
       # ✅ 空结果的**唯一**信号是 triage 侧显式外化的标记文件 `audit-verdicts.empty`：
-      #    零告警时 triage **不加密、不上传任何密文**，artifact 里只有这枚标记；
+      #    无 APPROVED 结论时 triage **不加密、不上传任何密文**，artifact 里只有这枚标记；
       #    有内容时则只有密文三件套、没有标记。两条分支互斥，判据明确、无歧义。
       # 说明：判空只看「有没有待发布内容」，不解析密文，也不放宽任何完整性要求——
       #      一旦确有密文需要解密，仍严格走「配对自检 → 验 HMAC → 解密 → 数组校验」。
@@ -383,9 +383,9 @@ jobs:
         id: precheck
         run: |
           set -euo pipefail
-          # 1) 显式空结论标记：triage 判定为零告警时写入（此时 artifact 内无任何密文）
+          # 1) 显式空结论标记：triage 判定为无 APPROVED 结论时写入（此时 artifact 内无任何密文）
           if [ -f /tmp/audit/audit-verdicts.empty ]; then
-            echo "triage 已标记本次无 APPROVED 结论（零告警），跳过解密与发文。"
+            echo "triage 已标记本次无 APPROVED 结论（无待发布结论），跳过解密与发文。"
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
