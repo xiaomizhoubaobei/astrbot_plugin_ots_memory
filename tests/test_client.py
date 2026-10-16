@@ -115,7 +115,10 @@ def test_content_md5_matches_body() -> None:
     client = _make_client()
     body = b'{"a":1}'
     headers = client._build_headers("AddMemories", body)
-    expected = base64.b64encode(hashlib.md5(body).digest()).decode("utf-8")
+    # 与实现同口径：MD5 是 OTS 协议校验用途，非安全哈希，故标注 usedforsecurity=False
+    expected = base64.b64encode(
+        hashlib.md5(body, usedforsecurity=False).digest()
+    ).decode("utf-8")
     assert headers["x-ots-contentmd5"] == expected
 
 
@@ -167,7 +170,10 @@ def test_signature_matches_known_answer_vector() -> None:
     # 实现的派生链必须与上述独立链一致（否则 KAT 断言会失效）
     assert client._get_signing_key(sign_date) == independent_key
 
-    md5 = base64.b64encode(hashlib.md5(body).digest()).decode("utf-8")
+    # 逐字复刻 OTS 协议头：MD5 为请求体校验用途，非安全哈希
+    md5 = base64.b64encode(hashlib.md5(body, usedforsecurity=False).digest()).decode(
+        "utf-8"
+    )
     header_items = [
         "x-ots-accesskeyid:LTAI_test_ak",
         "x-ots-apiversion:2015-12-31",

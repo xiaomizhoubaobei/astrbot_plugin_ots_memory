@@ -55,7 +55,13 @@ class OTSMemoryClient:
         date_str = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
         date_only = now.strftime("%Y%m%d")
 
-        md5_digest = base64.b64encode(hashlib.md5(body_bytes).digest()).decode("utf-8")
+        # x-ots-contentmd5 是阿里云 OTS 协议的**强制请求头**，用 MD5 校验请求体完整性，
+        # 属协议约定而非安全用途（防篡改由 HMAC-SHA256 签名承担）。
+        # 显式标注 usedforsecurity=False：既如实声明用途，也让 Bandit B324
+        # （weak-hash）不再把这一合规用法误判为 HIGH 风险。
+        md5_digest = base64.b64encode(
+            hashlib.md5(body_bytes, usedforsecurity=False).digest()
+        ).decode("utf-8")
         canonical_uri = f"/{api_name}"
 
         headers = {

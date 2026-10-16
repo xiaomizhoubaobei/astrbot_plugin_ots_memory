@@ -36,11 +36,17 @@ jobs:
         python -m pip install --upgrade pip
         pip install bandit
 
-    # 不加 `|| true`：Bandit 发现中高危问题时以非零码退出，使本工作流真正告警。
+    # 不加 `|| true`：Bandit 命中扫描阈值时以非零码退出，使本工作流真正告警。
     # 报告文件仍会在后续步骤上传，故失败也不丢证据。
+    #
+    # `-ll`（severity-level=MEDIUM）：只把**中/高**危问题计入失败判定，与注释
+    # 声明的「中高危才告警」口径一致。不加阈值时 Bandit 对**任何**级别（含
+    # LOW）都返回非零码——例如测试里的 `assert`（B101）与测试用假密钥
+    # （B106）本就是 LOW 噪音，会把工作流永久标红、淹没真实风险。
+    # 完整报告（含 LOW）仍写入 bandit-report.json 工件，人工可全量核对。
     - name: 运行 Bandit 安全扫描
       run: |
-        bandit -r . -f json -o bandit-report.json
+        bandit -r . -ll -f json -o bandit-report.json
 
     - name: 上传 Bandit 结果
       if: always()
