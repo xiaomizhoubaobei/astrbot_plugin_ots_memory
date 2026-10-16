@@ -12,7 +12,6 @@ import hmac
 import json
 
 import pytest
-
 from astrbot_plugin_ots_memory.client import OTSMemoryClient
 
 
@@ -167,6 +166,7 @@ def test_signature_changes_with_body() -> None:
 
 
 # ── 请求体组装 ──────────────────────────────────────────────────────────────
+
 
 class _FakeResponse:
     """最小 aiohttp 响应替身，用于捕获出站请求."""
