@@ -1,0 +1,84 @@
+# 此工作流程使用未经 GitHub 认证的操作。它们由第三方提供，并受单独的服务条款、隐私政策和支持文档的约束。
+
+name: Scorecard 供应链安全
+on:
+  # 分支保护规则变更时运行
+  branch_protection_rule:
+  # 默认分支收到推送时运行：只有此场景可发布结果并收敛到安全面板。
+  # 保留 branches 过滤（与官方模板一致，官方使用 push.branches: [ $default-branch ]）：
+  # 触发器负责"不产生无谓的 skipped 运行"，作业级守卫负责"即使触发也不在非默认分支发布"，
+  # 两者职责不同、不可互相替代。若将来默认分支重命名，此处需同步改名
+  # （守卫用 default_branch 动态判断，重命名不会导致错误分支发布，但会漏掉 push 触发）。
+  push:
+    branches: [ "main" ]
+  # 每周一 00:00 UTC 定时运行（PR 无法携带固定定时，仅默认分支生效）
+  schedule:
+    - cron: '0 0 * * 1'
+  # 支持手动触发，便于排障与补跑
+  workflow_dispatch:
+
+# 声明默认权限为只读。
+# 注意：此处必须是「只读」的工作流级权限，不能写成 `id-token: write`。
+# Scorecard 在 publish_results: true 时由 OSSF 发布 API 校验工作流形态，
+# 明确禁止「工作流级 write 权限」，并要求 `id-token: write` 只出现在
+# 运行 ossf/scorecard-action 的那个 job 上（见 scorecard-action 文档
+# Workflow Restrictions）。此前把它提到工作流级后，OSSF API 拒绝了结果发布，
+# 导致「运行分析」步骤直接失败；故恢复为官方模板的 read-all 写法，
+# 写权限一律下沉到下方 job 级 permissions。
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard 分析
+    runs-on: ubuntu-latest
+    # `publish_results: true` 仅在从默认分支运行时有效，因此除事件类型外还须校验 ref。
+    # schedule：事件本身固定以默认分支为 ref，一并校验以保持写法统一；
+    # workflow_dispatch：可指定任意分支触发，若不校验会在非默认分支空跑（结果无法发布）；
+    # branch_protection_rule：本身即针对默认分支。
+    if: |
+      github.event_name == 'branch_protection_rule' ||
+      (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
+      (github.event_name == 'schedule' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+    permissions:
+      # 上传结果到代码扫描仪表板需要。
+      security-events: write
+      # 发布结果并获取徽章需要（请参阅下面的 publish_results）。
+      id-token: write
+      actions: read
+      contents: read
+
+    steps:
+      - name: 加固运行器（审计所有出站调用）
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - name: "检出代码"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "运行分析"
+        uses: ossf/scorecard-action@f49aabe0b5af0936a0987cfb85d86b75731b0186 # v2.4.1
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+          # （可选）如果您有一个 .gitattributes 文件标记为 export-ignore，请取消注释 file_mode
+
+      # 将结果上传为构件（可选）。注释掉将禁用将 SARIF 格式的运行结果
+      # 上传到仓库的 Actions 选项卡。
+      - name: "上传构件"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: SARIF 文件
+          path: results.sarif
+          retention-days: 5
+
+      # 将结果上传到 GitHub 的代码扫描仪表板（可选）。
+      # 注释掉将禁用将结果上传到您仓库的代码扫描仪表板
+      - name: "上传到代码扫描"
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: results.sarif

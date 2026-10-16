@@ -1,0 +1,55 @@
+# 此工作流程会警告并随后关闭在指定时间内没有活动的议题和拉取请求。
+#
+# 您可以通过修改此文件来调整行为。
+# 更多信息，请参阅：
+# `https://github.com/actions/stale`
+name: 标记不活跃的议题和拉取请求
+
+on:
+  schedule:
+  - cron: '00 10 * * *'
+
+permissions:
+  contents: read
+  id-token: write
+  actions: read
+
+jobs:
+  stale:
+
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+      id-token: write
+      actions: read
+      contents: read
+
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - uses: actions/stale@b5d41d4e1d5dceea10e7104786b73624c18a190f # v10.2.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          stale-issue-message: |
+            ⚠️ 此议题已超过30天没有活动
+
+            由于长时间没有新的活动或回复，此议题已被标记为不活跃状态。
+
+            如果您仍希望处理此议题，请添加新的评论或回复，这将取消不活跃状态。
+            如果此议题已解决或不再相关，请手动关闭它。
+
+            感谢您的贡献！
+          stale-pr-message: |
+            ⚠️ 此拉取请求已超过30天没有活动
+
+            由于长时间没有新的活动或更新，此拉取请求已被标记为不活跃状态。
+
+            如果您仍希望合并此拉取请求，请添加新的评论或更新代码，这将取消不活跃状态。
+            如果此拉取请求已不再需要，请手动关闭它。
+
+            感谢您的贡献！
+          stale-issue-label: '🔴 长时间无活动-议题'
+          stale-pr-label: '🔴 长时间无活动-拉取请求'

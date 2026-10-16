@@ -1,0 +1,61 @@
+# 此工作流使用的操作未获得 GitHub 认证。
+# 它们由第三方提供，并受单独的服务条款、隐私政策和支持文档约束。
+
+name: 'Python 依赖审计'
+
+on:
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    - cron: '0 0 * * 0'
+  # 支持手动触发，便于排障与补跑
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  id-token: write
+  actions: read
+
+jobs:
+  audit:
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        # 与插件声明的 Python 支持范围（>=3.10）保持一致：
+        # 本仓库依赖仅 aiohttp>=3.9.0，无更高下限约束，故审计下限取 3.12
+        # （与 CodeQL 的实际运行版本对齐），上限跟随仓库多矩阵策略
+        # （3.12/3.13/3.14），与 CodeQL、DevSkim 对齐。
+        python-version: ['3.12', '3.13', '3.14']
+    runs-on: ${{ matrix.os }}
+    name: 审计在 ${{ matrix.os }} 上使用 Python ${{ matrix.python-version }}
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+      actions: read
+
+    steps:
+      - name: 加固运行器（审计所有出站调用）
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+      - name: 检出仓库
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 设置 Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 安装依赖项
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 运行 pip-audit
+        uses: pypa/gh-action-pip-audit@1220774d901786e6f652ae159f7b6bc8fea6d266 # v1.1.0
+        with:
+          inputs: requirements.txt
+          vulnerability-service: OSV
+          summary: true
