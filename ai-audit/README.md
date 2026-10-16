@@ -311,9 +311,57 @@ shred -u handoff-private.pem 2>/dev/null || rm -f handoff-private.pem
   因此正确顺序是：**先暂停触发并等待现有运行完成** → 再更新仓库公钥 → 再更新 Secret 私钥 →
   **验证新密钥配对**（跑一次成功解密）→ 恢复触发。旧密文因留存期短（`retention-days: 7`）
   会自然过期。
-- 若 `AUDIT_HANDOFF_PRIVATE_KEY` 未配置，`publish` job 会**明确失败**（而非降级为明文放行）。
+- 若 `AUDIT_HANDOFF_PRIVATE_KEY` 未配置，`publish` job 会**明确失败**（而非降级为明文放行）——
+  但仅在**确有待发布结论**时如此，见下方「空结论短路」。
 - 🔏 **完整性**：`triage` 侧在加密后对密文再做 HMAC-SHA256（encrypt-then-MAC），
   `publish` 侧**先验 HMAC 再解密**——密文被篡改即拒绝，不以「是不是 JSON 数组」充当完整性校验。
+
+#### 空结论短路：零告警时不再误报为失败
+
+`publish` job 的第 5 步（解密）之前有一道**判空短路**：
+
+```
+无 /tmp/audit/audit-verdicts.json.enc  →  直接跳过解密与发文（skip=true，不触碰私钥）
+密文三件套齐备                          →  才进入解密（此时才校验私钥）
+```
+
+- **为什么需要**：`triage` 在**无 APPROVED 结论**时也会正常产出（artifact 是合法密文，只是明文为 `[]`）。
+  若一味「先解密再判空」，一条空结论也会去撞 `AUDIT_HANDOFF_PRIVATE_KEY`：
+  首次部署尚未配密钥时，`publish` 会在**毫无可发布内容**的情况下硬失败，
+  表现为「CodeQL 跑完 → AI 审计红了」，容易被误诊为链路故障。
+- **安全边界不变**：短路只看「产物是否齐备」，**不解析密文、不放宽任何完整性要求**；
+  一旦确有密文需要解密，仍严格走「密钥配对自检 → 验 HMAC → 解密 → 数组格式校验」。
+- **两条路径的差异只体现在「有无内容可发」**：无内容时跳过，有内容时该失败照旧失败
+  （密钥缺失/错配仍是明确失败，绝不降级为明文放行）。
+
+#### 首次部署的推荐顺序
+
+密钥是「公钥入库 + 私钥进 Secret」**成对**生效的，只做一半必然解密失败。推荐：
+
+1. 生成密钥对（见上一小节），**公钥提交入库、私钥存 Secret**；
+2. 先在本地做一次配对自检（见下），确认公私钥同源；
+3. 再跑一次 `workflow_dispatch` 验证整条链路。
+
+> 💡 **配对自检**（无需跑整条流水线）：用公钥加密一段探针、再用私钥解回，
+> 能解回即说明配对正确：
+> ```bash
+> printf 'probe' > /tmp/p
+> openssl pkeyutl -encrypt -pubin -inkey ai-audit/handoff-public-key.pem \
+>   -in /tmp/p -out /tmp/p.enc -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
+> printf '%s' "$AUDIT_HANDOFF_PRIVATE_KEY" > /tmp/priv.pem
+> openssl pkeyutl -decrypt -inkey /tmp/priv.pem -in /tmp/p.enc \
+>   -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
+> shred -u /tmp/priv.pem /tmp/p /tmp/p.enc   # 用后即毁
+> ```
+
+#### 排错对照
+
+| 现象 | 含义 | 处置 |
+|------|------|------|
+| 报「缺少仓库 Secret `AUDIT_HANDOFF_PRIVATE_KEY`」 | 私钥未配（或配了空值）**且确有待发布结论** | 按提示生成密钥对并配置 Secret；无待发布内容时该步会**自动跳过**，不再报错 |
+| 报「私钥无法解开封装密钥：密钥不配对」 | Secret 里的私钥与仓库公钥**不是同一对** | 重新生成一对，**公钥入库 + 私钥进 Secret 两步都做**，再做一次配对自检 |
+| 报「HMAC 校验失败」 | 密文被篡改，或拿的是**不该用的旧密文** | 确认 artifact 未经修改；必要时重跑上游 `triage` 重新产出密文 |
+| 无任何报错但没建 Issue | 结论里没有 `status == APPROVED` 的条目 | 属**预期**：门禁只放行 APPROVED，可查 triage 阶段的 `_verdict` 判定理由 |
 
 ### 方式二：把 `ai_audit` 作为可导入包安装
 

@@ -323,6 +323,32 @@ jobs:
           name: audit-verdicts
           path: /tmp/audit
 
+      # ── 空结论短路（必须在解密之前） ───────────────────────────────────────
+      # ⚠️ 顺序很关键：判断「有没有东西要发布」**早于**任何密码学操作。
+      #    成因：triage 在**无 APPROVED 结论**时也会正常产出（artifact 仍是合法的密文，
+      #    只是明文为 `[]`）。若一味「先解密再判空」，一条空结论也会去撞
+      #    `AUDIT_HANDOFF_PRIVATE_KEY`：Secret 尚未配置时，本 job 会在**毫无可发布内容**
+      #    的情况下硬失败（表现为「CodeQL 跑完 → AI 审计红了」，实际却无事可做），
+      #    既误导排查、又把「首次部署尚未配密钥」误报成链路故障。
+      #    故此处先用**确定性外壳检查**（密文/封装/MAC 三件套是否齐备）判空——它不碰私钥，
+      #    因此与 Secret 是否配置无关。确有密文需要解密时才继续往下走。
+      # 说明：判空只看「产物是否齐备」，不看内容；内容是否为空数组由 triage 侧
+      #      （`[]` 也是合法结论）决定，故这里不解析密文，也不放宽任何完整性要求。
+      - name: 解密前短路（无待发布结论则跳过，不触碰私钥）
+        id: precheck
+        run: |
+          set -euo pipefail
+          if [ ! -f /tmp/audit/audit-verdicts.json.enc ]; then
+            echo "无待发布结论（缺少 audit-verdicts.json.enc），跳过解密与发文。"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          test -f /tmp/audit/audit-verdicts.key.enc \
+            || { echo "缺少封装密钥 audit-verdicts.key.enc" >&2; exit 1; }
+          test -f /tmp/audit/audit-verdicts.json.mac \
+            || { echo "缺少完整性标签 audit-verdicts.json.mac" >&2; exit 1; }
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
       # ── 解密审计结论（协调披露的收口） ─────────────────────────────────────
       # artifact 里只有密文与 HMAC（见 triage job 的加密步骤）；只有本 job 经 Secret
       # 拿到私钥，是**唯一**能把内容变回可读的一方 —— 这正是「为发布者加密」的落地。
@@ -330,28 +356,65 @@ jobs:
       #    数据喂给下游建 Issue。仅做「是不是 JSON 数组」的格式检查**不构成**完整性校验。
       # 若 Secret 缺失或密钥不匹配：明确失败，绝不退化成「明文放行」。
       - name: 校验完整性并解密审计结论（私钥仅本 job 持有）
+        if: steps.precheck.outputs.skip != 'true'
         env:
           AUDIT_HANDOFF_PRIVATE_KEY: ${{ secrets.AUDIT_HANDOFF_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          : "${AUDIT_HANDOFF_PRIVATE_KEY:?请配置仓库 Secret AUDIT_HANDOFF_PRIVATE_KEY（与 ai-audit/handoff-public-key.pem 配对的私钥），否则无法解密审计结论}"
-          test -f /tmp/audit/audit-verdicts.json.enc \
-            || { echo "缺少密文 audit-verdicts.json.enc" >&2; exit 1; }
-          test -f /tmp/audit/audit-verdicts.key.enc \
-            || { echo "缺少封装密钥 audit-verdicts.key.enc" >&2; exit 1; }
-          test -f /tmp/audit/audit-verdicts.json.mac \
-            || { echo "缺少完整性标签 audit-verdicts.json.mac" >&2; exit 1; }
+          # 私钥缺失时给出**可照做**的修复指引，而不是一句干巴巴的报错：
+          #   密钥对必须「公钥入库 + 私钥进 Secret」两步成对完成，只做一半必然解密失败。
+          if [ -z "${AUDIT_HANDOFF_PRIVATE_KEY:-}" ]; then
+            {
+              echo "缺少仓库 Secret AUDIT_HANDOFF_PRIVATE_KEY，无法解密审计结论（已按设计明确失败，不降级为明文放行）。"
+              echo ""
+              echo "修复步骤（密钥对必须成对配置，只配一半必然失败）："
+              echo "  1) 本地生成 3072 位密钥对："
+              echo "       openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out handoff-private.pem"
+              echo "       openssl rsa -in handoff-private.pem -pubout -out handoff-public.pem"
+              echo "  2) 用新公钥替换仓库内占位公钥并提交："
+              echo "       cp handoff-public.pem ai-audit/handoff-public-key.pem"
+              echo "  3) 把**私钥全文**存入 Secret（Settings → Secrets and variables → Actions → New secret）："
+              echo "       Name: AUDIT_HANDOFF_PRIVATE_KEY"
+              echo "       Value: handoff-private.pem 的完整内容"
+              echo "  4) 用后立即销毁本地私钥：shred -u handoff-private.pem"
+              echo ""
+              echo "详见 ai-audit/README.md「加密交接：生成密钥对并注入私钥」一节。"
+            } >&2
+            exit 1
+          fi
           umask 077
           # 把私钥落到临时文件（Secret 不入命令行，避免进程列表泄漏）
           KEYFILE="$(mktemp)"
           printf '%s\n' "$AUDIT_HANDOFF_PRIVATE_KEY" > "$KEYFILE"
           # 1) 用私钥解出「加密密钥 + MAC 密钥」JSON（RSA-OAEP-SHA256）
+          #    ⚠️ 这一步同时充当**密钥配对自检**：能解开封装密钥，才说明本 Secret 里的私钥
+          #       确实与 triage 用的仓库公钥配对。错配（如换了公钥却没换私钥，或反之）
+          #       会在此失败——那属于**配置错误**，不是密文被篡改，故单独给出可照做的指引，
+          #       避免把「密钥没换完」误诊成「artifact 被篡改」。
           KEYS="$(mktemp)"
-          openssl pkeyutl -decrypt -inkey "$KEYFILE" \
-            -in /tmp/audit/audit-verdicts.key.enc -out "$KEYS" \
-            -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
-          ENC_KEY="$(jq -er '.enc_key' "$KEYS")"
-          MAC_KEY="$(jq -er '.mac_key' "$KEYS")"
+          if ! openssl pkeyutl -decrypt -inkey "$KEYFILE" \
+               -in /tmp/audit/audit-verdicts.key.enc -out "$KEYS" \
+               -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256; then
+            {
+              echo "私钥无法解开封装密钥：Secret AUDIT_HANDOFF_PRIVATE_KEY 与仓库内"
+              echo "ai-audit/handoff-public-key.pem 不是同一对（或将私钥配错/配了占位值）。"
+              echo ""
+              echo "修复步骤（公钥与私钥必须同源、成对更新）："
+              echo "  1) 重新生成一对：openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out handoff-private.pem"
+              echo "                   openssl rsa -in handoff-private.pem -pubout -out handoff-public.pem"
+              echo "  2) 公钥提交入库：cp handoff-public.pem ai-audit/handoff-public-key.pem"
+              echo "  3) 私钥全文更新到 Secret：AUDIT_HANDOFF_PRIVATE_KEY"
+              echo ""
+              echo "⚠️ 轮换顺序：先暂停触发并等待现有运行结束 → 更新公钥 → 更新私钥 → 验证配对 → 恢复触发。"
+              echo "   中途运行会「旧公钥加密、新私钥解密」而失败（见 ai-audit/README.md 密钥轮换）。"
+            } >&2
+            shred -u "$KEYFILE" "$KEYS" 2>/dev/null || rm -f "$KEYFILE" "$KEYS"
+            exit 1
+          fi
+          ENC_KEY="$(jq -er '.enc_key' "$KEYS")" \
+            || { echo "封装密钥解开后缺少 enc_key 字段，拒绝继续。" >&2; exit 1; }
+          MAC_KEY="$(jq -er '.mac_key' "$KEYS")" \
+            || { echo "封装密钥解开后缺少 mac_key 字段，拒绝继续。" >&2; exit 1; }
           # 2) 【先验完整性】对密文重算 HMAC-SHA256 并与交付的标签做**定长比较**
           #    ⚠️ 必须在解密之前：CBC 无完整性，篡改密文会导致「可预测的明文损坏」，
           #       只有 MAC 通过才说明这份密文确实出自持有合法公钥的 triage。
@@ -385,13 +448,16 @@ jobs:
       #    本门禁确定性保证的是「结论 → 发文」这一段——只认 APPROVED 字段，不做二次模型判断。
       #    故**不要**宣称「被驳回的误报绝无可能被创建」，只能说「非 APPROVED 的告警不可能被创建」。
       # GH_PAT 仅在本 step 注入，且只用于 GitHub API 建 Issue。
+      # ⚠️ 与解密步骤共用 precheck 短路条件：无待发布结论时本步**直接跳过**，
+      #    连 GH_PAT 都不必读取（避免「无内容可发却先校验令牌」的无谓失败）。
       - name: 按审计结论创建 Issue（幂等 + 并发自愈）
+        if: steps.precheck.outputs.skip != 'true'
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          : "${GH_PAT:?请配置仓库 Secret GH_PAT 以创建 Issue}"
+          : "${GH_PAT:?请配置仓库 Secret GH_PAT 以创建 Issue（详见 ai-audit/README.md 所需 Secrets 表）}"
           FILE=/tmp/audit/audit-verdicts.json
           if [ ! -f "$FILE" ]; then echo "无结论文件，跳过"; exit 0; fi
           # 防御：结论文件必须是合法 JSON 数组，否则直接失败（不猜测、不放行）
