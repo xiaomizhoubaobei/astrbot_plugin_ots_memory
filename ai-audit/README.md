@@ -364,12 +364,19 @@ triage 侧：jq 'length' == 0
 > #    若不开启 `-e`，它会**掩盖** `openssl pkeyutl -decrypt` 的非零退出状态——
 > #    即使解密失败（公私钥不配对），脚本整体仍会「成功」返回，自检形同虚设。
 > set -euo pipefail
-> # ⚠️ 私钥落盘前先挂 `EXIT` 清理钩子：`set -e` 下**任何**中途失败都会直接退出，
-> #    绝无机会走到末尾的 `shred`——不挂钩子的话，一份明文私钥
-> #    `/tmp/priv.pem` 会遗留在磁盘上；在典型 `umask 022` 下它还是**全局可读**的。
-> #    钩子负责在任意退出路径（成功/失败/被信号打断）清理探针与私钥，
-> #    并**原样保留**退出码，既不掩盖失败、也不留残骸。
-> PRIV=/tmp/priv.pem; PROBE=/tmp/p; PROBE_ENC=/tmp/p.enc
+> # ⚠️ 私钥一律经 `mktemp` 落到**私有**临时文件（默认 0600、随机名）：
+> #    · 不能写固定路径（如 `/tmp/priv.pem`）——`/tmp` 是全局可写的共享目录，
+> #      固定名既会被他人**预置符号链接**（重定向**跟随链接**写到别处），
+> #      也会**覆盖**别人放在同名路径上的文件；`mktemp` 的随机名 + `O_EXCL`
+> #      创建从根上杜绝这两种「可预测路径」攻击。
+> #    · 不能依赖默认 `umask`——常见 `umask 022` 下重定向出的文件是 **0644 全局可读**，
+> #      明文私钥落成全局可读等于直接泄漏；`mktemp` 创建的却是 0600（仅属主可读）。
+> #    两条合起来才成立：随机名挡「符号链接/覆盖」，0600 挡「被读取」。
+> # ⚠️ 仍要挂 `EXIT` 清理钩子：`set -e` 下**任何**中途失败都会直接退出，
+> #    绝无机会走到末尾的 `shred`——钩子负责在任意退出路径（成功/失败/被信号打断）
+> #    删除探针与私钥，并**原样保留**退出码，既不掩盖失败、也不留残骸。
+> #    （钩子只缩短暴露窗口；防读取/防覆盖由上面的 `mktemp` 负责，二者缺一不可。）
+> PRIV="$(mktemp)"; PROBE="$(mktemp)"; PROBE_ENC="$(mktemp)"; rm -f "$PROBE_ENC"
 > cleanup() {
 >   rc=$?
 >   shred -u "$PRIV" "$PROBE" "$PROBE_ENC" 2>/dev/null || rm -f "$PRIV" "$PROBE" "$PROBE_ENC"
@@ -379,6 +386,8 @@ triage 侧：jq 'length' == 0
 > printf 'probe' > "$PROBE"
 > openssl pkeyutl -encrypt -pubin -inkey ai-audit/handoff-public-key.pem \
 >   -in "$PROBE" -out "$PROBE_ENC" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
+> # 私钥经变量从 stdin 写入（不把 Secret 放进命令行，避免进程列表泄漏）；
+> # 落盘文件由 mktemp 创建，权限已是 0600，无需再赌环境 umask。
 > printf '%s' "$AUDIT_HANDOFF_PRIVATE_KEY" > "$PRIV"
 > # 解密失败即中止（`set -e` 生效），此时由上面的 EXIT 钩子收尾清理、不留私钥残骸
 > openssl pkeyutl -decrypt -inkey "$PRIV" -in "$PROBE_ENC" \
