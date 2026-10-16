@@ -318,18 +318,27 @@ shred -u handoff-private.pem 2>/dev/null || rm -f handoff-private.pem
 
 #### 空结论短路：零告警时不再误报为失败
 
-`publish` job 的第 5 步（解密）之前有一道**判空短路**：
+判空短路位于 `publish` job 的**「解密前短路（无待发布结论则跳过，不触碰私钥）」**步骤，
+排在**解密步骤之前**（即 job 内第 3 步，见 `ai-audit-scheduled.yml` 的 `publish.steps`；
+解密本身是第 4 步）。判据是 triage 侧显式外化的**空结论标记**：
 
 ```
-无 /tmp/audit/audit-verdicts.json.enc  →  直接跳过解密与发文（skip=true，不触碰私钥）
-密文三件套齐备                          →  才进入解密（此时才校验私钥）
+publish 侧：/tmp/audit/audit-verdicts.empty 存在
+        →  直接跳过解密与发文（skip=true，不触碰私钥）
+
+triage 侧：jq 'length' == 0
+        →  只产出 audit-verdicts.empty 标记，**不加密、不上传任何密文**
+        （有内容时则相反：只上传密文三件套，不产出标记）
 ```
 
-- **为什么需要**：`triage` 在**无 APPROVED 结论**时也会正常产出（artifact 是合法密文，只是明文为 `[]`）。
-  若一味「先解密再判空」，一条空结论也会去撞 `AUDIT_HANDOFF_PRIVATE_KEY`：
-  首次部署尚未配密钥时，`publish` 会在**毫无可发布内容**的情况下硬失败，
+- **为什么需要**：`triage` 在**无 APPROVED 结论**时也会正常收尾（兜底把 `/tmp/audit-verdicts.json`
+  写成 `[]`）。若「先加密上传、再在 publish 侧先解密再判空」，一条空结论也会去撞
+  `AUDIT_HANDOFF_PRIVATE_KEY`：首次部署尚未配密钥时，`publish` 会在**毫无可发布内容**的情况下硬失败，
   表现为「CodeQL 跑完 → AI 审计红了」，容易被误诊为链路故障。
-- **安全边界不变**：短路只看「产物是否齐备」，**不解析密文、不放宽任何完整性要求**；
+- **两条分支互斥、判据明确**：零告警时 artifact 内**只有** `audit-verdicts.empty`、**没有任何密文**，
+  有内容时**只有**密文三件套、没有标记——`publish` 只认这枚标记（另保留「既无标记又无密文」
+  的兜底短路，兼容旧产物）。因此零告警的运行**无需私钥**，与 `Secret` 是否配置完全解耦。
+- **安全边界不变**：短路只看「有没有待发布内容」，**不解析密文、不放宽任何完整性要求**；
   一旦确有密文需要解密，仍严格走「密钥配对自检 → 验 HMAC → 解密 → 数组格式校验」。
 - **两条路径的差异只体现在「有无内容可发」**：无内容时跳过，有内容时该失败照旧失败
   （密钥缺失/错配仍是明确失败，绝不降级为明文放行）。
@@ -345,13 +354,20 @@ shred -u handoff-private.pem 2>/dev/null || rm -f handoff-private.pem
 > 💡 **配对自检**（无需跑整条流水线）：用公钥加密一段探针、再用私钥解回，
 > 能解回即说明配对正确：
 > ```bash
+> # ⚠️ 必须 `set -e`（或显式检查解密退出码）：末尾的 `shred` 是清理命令，
+> #    若不开启 `-e`，它会**掩盖** `openssl pkeyutl -decrypt` 的非零退出状态——
+> #    即使解密失败（公私钥不配对），脚本整体仍会「成功」返回，自检形同虚设。
+> set -euo pipefail
 > printf 'probe' > /tmp/p
 > openssl pkeyutl -encrypt -pubin -inkey ai-audit/handoff-public-key.pem \
 >   -in /tmp/p -out /tmp/p.enc -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
 > printf '%s' "$AUDIT_HANDOFF_PRIVATE_KEY" > /tmp/priv.pem
+> # 解密失败即中止（`set -e` 生效，不会滑到 shred 后「假成功」）
 > openssl pkeyutl -decrypt -inkey /tmp/priv.pem -in /tmp/p.enc \
 >   -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256
-> shred -u /tmp/priv.pem /tmp/p /tmp/p.enc   # 用后即毁
+> # 清理放最后，且用 `|| true` 兜底——绝不让清理命令决定自检成败
+> shred -u /tmp/priv.pem /tmp/p /tmp/p.enc 2>/dev/null || rm -f /tmp/priv.pem /tmp/p /tmp/p.enc
+> echo "✅ 配对自检通过：公私钥同源"
 > ```
 
 #### 排错对照
@@ -361,7 +377,8 @@ shred -u handoff-private.pem 2>/dev/null || rm -f handoff-private.pem
 | 报「缺少仓库 Secret `AUDIT_HANDOFF_PRIVATE_KEY`」 | 私钥未配（或配了空值）**且确有待发布结论** | 按提示生成密钥对并配置 Secret；无待发布内容时该步会**自动跳过**，不再报错 |
 | 报「私钥无法解开封装密钥：密钥不配对」 | Secret 里的私钥与仓库公钥**不是同一对** | 重新生成一对，**公钥入库 + 私钥进 Secret 两步都做**，再做一次配对自检 |
 | 报「HMAC 校验失败」 | 密文被篡改，或拿的是**不该用的旧密文** | 确认 artifact 未经修改；必要时重跑上游 `triage` 重新产出密文 |
-| 无任何报错但没建 Issue | 结论里没有 `status == APPROVED` 的条目 | 属**预期**：门禁只放行 APPROVED，可查 triage 阶段的 `_verdict` 判定理由 |
+| 无任何报错但**本次运行**没建新 Issue | ⚠️ **两种成因**，别急着归咎 `_verdict`：①**幂等去重命中**——该告警此前已建过 Issue（按 `alert_number` 指纹去重），本次属**正常跳过**；②结论里确实没有 `status == APPROVED` 的条目 | **先查去重、再查门禁**：按 `<!-- ai-audit-alert:<alert_number> -->` 指纹或标题 `[AI审计] CodeQL 告警 #<alert_number>` **检索**是否已有 open Issue（去重会**逐页遍历全部 open Issue**，不要只看首页）——**已存在 = ①，属预期**；确认无既有 Issue，才是②，再去查 triage 阶段的 `_verdict` 判定理由 |
+| 零告警（无 APPROVED 结论）时 `publish` 仍报「缺少 Secret」 | 判空短路**未生效**（应表现为跳过、不报错） | 检查 `publish` 短路步骤是否**排在解密之前**、且识别 `audit-verdicts.empty` 标记；再看 triage 是否在 `jq 'length' == 0` 时**未上传任何密文**（若仍上传了 `.enc`，说明 triage 侧判空步骤缺失或被跳过） |
 
 ### 方式二：把 `ai_audit` 作为可导入包安装
 

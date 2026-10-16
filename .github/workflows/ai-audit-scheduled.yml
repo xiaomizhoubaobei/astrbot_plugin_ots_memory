@@ -222,6 +222,41 @@ jobs:
           # 兜底：若 taskflow 未产出结论文件，写一个空数组，保证后续步骤有输入
           [ -f "$AUDIT_VERDICT_FILE" ] || echo '[]' > "$AUDIT_VERDICT_FILE"
 
+      # ── 空结论短路（triage 侧）：零告警时**不产出任何密文** ───────────────
+      # 成因：taskflow 在**无 APPROVED 结论**时也会正常收尾，兜底逻辑会把
+      #      `/tmp/audit-verdicts.json` 写成 `[]`。若照旧加密并上传，下游 publish
+      #      job 拿到的是「合法密文（明文为空数组）」——它**无从判断内容是否为空**，
+      #      只能照常解密，于是零告警的运行仍会去撞 `AUDIT_HANDOFF_PRIVATE_KEY`：
+      #      首次部署尚未配密钥时 publish 会**硬失败**（"CodeQL 跑完 → AI 审计红了"），
+      #      却是「毫无可发布内容」，把配置缺失误报成链路故障。
+      # 对策：在这里就用**确定性外壳检查**判空（`jq 'length'`），并把结论**显式**外化
+      #      为一枚标记文件 `audit-verdicts.empty`：
+      #        · 结论为空 → 只产出这枚标记，**跳过加密**、**不上传任何密文**；
+      #        · 结论非空 → 照常加密并上传密文三件套（不产出标记）。
+      #      publish 侧据此在**任何密码学操作之前**短路跳过，与私钥是否配置解耦。
+      # 安全边界不变：判空只看「条数」，不解析、不放宽任何完整性要求；确有内容时
+      #      仍严格走「配对自检 → 验 HMAC → 解密 → 数组格式校验」。
+      - name: 判空并写入空结论标记（零告警时不产出密文）
+        id: emptiness
+        run: |
+          set -euo pipefail
+          VERDICT_FILE=/tmp/audit-verdicts.json
+          [ -f "$VERDICT_FILE" ] || { echo "缺少结论文件 $VERDICT_FILE" >&2; exit 1; }
+          # 防御：结论文件必须是合法 JSON 数组（与 publish 侧同源的格式校验）
+          jq -e 'type == "array"' "$VERDICT_FILE" >/dev/null \
+            || { echo "结论文件不是 JSON 数组，拒绝继续" >&2; exit 1; }
+          COUNT="$(jq 'length' "$VERDICT_FILE")"
+          if [ "$COUNT" -eq 0 ]; then
+            # 显式空结论标记：**唯一**的空结果信号，publish 侧只认这枚文件
+            : > /tmp/audit-verdicts.empty
+            echo "empty=true" >> "$GITHUB_OUTPUT"
+            echo "本次无 APPROVED 结论（0 条），跳过加密与上传：仅交付空结论标记。"
+          else
+            rm -f /tmp/audit-verdicts.empty
+            echo "empty=false" >> "$GITHUB_OUTPUT"
+            echo "本次待发布结论 $COUNT 条，继续加密并上传密文三件套。"
+          fi
+
       # ── 加密结论（协调披露的关键一步） ─────────────────────────────────────
       # 威胁：artifact 会被平台**持久化，且任何拥有仓库读权限的人都能下载**
       #       （公开仓库 = 任何互联网读者）。而 verdict 里含 `report` 全文、
@@ -241,6 +276,7 @@ jobs:
       #       故用 encrypt-then-MAC 达到等效的「密文被篡改即拒绝」，而非只做数组格式检查。
       # 顺带收益：密文对读权限所有者不可读，且密文不可执行，下游仍只消费数据。
       - name: 加密审计结论（公钥混合加密 + encrypt-then-MAC，仅上传密文）
+        if: steps.emptiness.outputs.empty != 'true'
         env:
           # 公钥随仓库提交（公开信息），triage 不接触任何 Secret
           AUDIT_HANDOFF_PUBLIC_KEY: ${{ github.workspace }}/ai-audit/handoff-public-key.pem
@@ -275,7 +311,12 @@ jobs:
 
       # 上传审计结论（**密文**），交给下游持令牌与私钥的 publish job。
       # 仅上传加密后的纯数据，不上传任何可执行产物，避免下游执行不可信代码。
-      - name: 上传加密后的审计结论 artifact
+      # ⚠️ 上传路径是**互斥**的两条分支（见上一步的 `empty` 输出）：
+      #    · 非空 → 上传密文三件套（.enc/.key.enc/.mac）；
+      #    · 空   → 只上传空结论标记 audit-verdicts.empty（**不含任何密文**）。
+      #      正因如此，零告警运行时 artifact 里根本不存在 `.enc`，publish 侧
+      #      的判空短路无论如何都会命中，无需（也不应）依赖私钥。
+      - name: 上传加密后的审计结论 artifact（空结论时只上传标记）
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: audit-verdicts
@@ -283,6 +324,8 @@ jobs:
             /tmp/audit-verdicts.json.enc
             /tmp/audit-verdicts.key.enc
             /tmp/audit-verdicts.json.mac
+            /tmp/audit-verdicts.empty
+          # 空结论时只有 .empty、无内容时为三件套，任何一个分支都至少有一个文件
           if-no-files-found: error
           # 进一步缩短留存期，降低密文在平台上被长期留存的暴露面
           retention-days: 7
@@ -325,24 +368,34 @@ jobs:
 
       # ── 空结论短路（必须在解密之前） ───────────────────────────────────────
       # ⚠️ 顺序很关键：判断「有没有东西要发布」**早于**任何密码学操作。
-      #    成因：triage 在**无 APPROVED 结论**时也会正常产出（artifact 仍是合法的密文，
-      #    只是明文为 `[]`）。若一味「先解密再判空」，一条空结论也会去撞
-      #    `AUDIT_HANDOFF_PRIVATE_KEY`：Secret 尚未配置时，本 job 会在**毫无可发布内容**
-      #    的情况下硬失败（表现为「CodeQL 跑完 → AI 审计红了」，实际却无事可做），
+      #    成因：triage 在**无 APPROVED 结论**时会正常收尾（兜底把结论写成 `[]`）。
+      #    若「先解密再判空」，一条空结论也会去撞 `AUDIT_HANDOFF_PRIVATE_KEY`：
+      #    Secret 尚未配置时，本 job 会在**毫无可发布内容**的情况下硬失败
+      #    （表现为「CodeQL 跑完 → AI 审计红了」，实际却无事可做），
       #    既误导排查、又把「首次部署尚未配密钥」误报成链路故障。
-      #    故此处先用**确定性外壳检查**（密文/封装/MAC 三件套是否齐备）判空——它不碰私钥，
-      #    因此与 Secret 是否配置无关。确有密文需要解密时才继续往下走。
-      # 说明：判空只看「产物是否齐备」，不看内容；内容是否为空数组由 triage 侧
-      #      （`[]` 也是合法结论）决定，故这里不解析密文，也不放宽任何完整性要求。
+      #    故此处先用**确定性外壳检查**判空——它不碰私钥，与 Secret 是否配置无关。
+      # ✅ 空结果的**唯一**信号是 triage 侧显式外化的标记文件 `audit-verdicts.empty`：
+      #    零告警时 triage **不加密、不上传任何密文**，artifact 里只有这枚标记；
+      #    有内容时则只有密文三件套、没有标记。两条分支互斥，判据明确、无歧义。
+      # 说明：判空只看「有没有待发布内容」，不解析密文，也不放宽任何完整性要求——
+      #      一旦确有密文需要解密，仍严格走「配对自检 → 验 HMAC → 解密 → 数组校验」。
       - name: 解密前短路（无待发布结论则跳过，不触碰私钥）
         id: precheck
         run: |
           set -euo pipefail
-          if [ ! -f /tmp/audit/audit-verdicts.json.enc ]; then
-            echo "无待发布结论（缺少 audit-verdicts.json.enc），跳过解密与发文。"
+          # 1) 显式空结论标记：triage 判定为零告警时写入（此时 artifact 内无任何密文）
+          if [ -f /tmp/audit/audit-verdicts.empty ]; then
+            echo "triage 已标记本次无 APPROVED 结论（零告警），跳过解密与发文。"
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # 2) 兼容旧产物 / 兜底：既无标记又无密文，同样视为无待发布结论
+          if [ ! -f /tmp/audit/audit-verdicts.json.enc ]; then
+            echo "无待发布结论（既无 audit-verdicts.empty 标记，也无 audit-verdicts.json.enc 密文），跳过解密与发文。"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # 3) 有密文却缺配套材料 → 属产物不完整，明确失败（不猜、不放行）
           test -f /tmp/audit/audit-verdicts.key.enc \
             || { echo "缺少封装密钥 audit-verdicts.key.enc" >&2; exit 1; }
           test -f /tmp/audit/audit-verdicts.json.mac \
