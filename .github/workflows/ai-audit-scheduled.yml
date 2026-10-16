@@ -1,0 +1,433 @@
+# =============================================================================
+# AI 审计（AI 漏洞分流）— CodeQL 完成后自动运行
+# =============================================================================
+# 用途：在 CodeQL 工作流（.github/workflows/CodeQL.yml）完成后自动运行
+#       ai-audit/alert_triage_example.yaml，消费本仓库 CodeQL 扫描产生的最
+#       新安全告警，做 AI 自动分流。
+#
+# ── 安全模型（本工作流的核心设计，勿削弱） ──────────────────────────────────
+# 威胁：workflow_run 会为 **PR（含 fork）触发的 CodeQL 运行** 也开火，而 PR 源码
+#       由提交者完全控制；若让「持令牌建 Issue」的 job 同时检出并执行 PR 源码，
+#       fork 提交者即可借 PR 改写工作流/审计模板，驱动 agent 拿高权限 PAT 发文
+#       —— 即典型 pwn-request（fork-controlled input → 高权限令牌）。
+#
+# 对策：把流程劈成两段，中间只以 artifact（纯数据）传信，令牌与不可信源码
+#       物理隔离：
+#       ┌─ triage  job（无任何 Secret / 无写权限）──────────────────────────┐
+#       │  仅在**可信 ref**（默认分支或手动触发的本次 ref）上检出源码；      │
+#       │  只给 content-free 的只读审计能力；产出结构化审计结论 artifact。   │
+#       └──────────────────────────────────────────────────────────────────┘
+#                              ↓ audit-verdicts.json（数据）
+#       ┌─ publish job（唯一持 GH_PAT 的 job）──────────────────────────────┐
+#       │  不检出/不执行任何不可信源码；只消费 artifact 里的结构化结论。     │
+#       │  【协调披露】漏洞细节走**私密 security advisory**，公开 Issue 只   │
+#       │  留脱敏占位（指纹 + 告警编号），不在修复前暴露可利用细节。        │
+#       │  输入已被上游 schema 约束，无法注入。                              │
+#       └──────────────────────────────────────────────────────────────────┘
+#
+# 触发设计：
+#   - workflow_run：监听 CodeQL.yml（name: "代码质量分析"）的 completed 事件。
+#     仅当上游运行成功、且其 head 分支属于**本仓库**（非 fork）时才进入 triage
+#     （见 jobs.triage.if 的 head_repository 门禁），从源头掐断 fork 源码流入。
+#   - workflow_dispatch：保留手动触发，方便首次部署时验证链路。
+#
+# 所需 Secrets（仓库 Settings → Secrets and variables → Actions）：
+#   - AI_API_ENDPOINT 必填，上游 base_url（OpenAI 兼容口，如 https://api.deepseek.com/v1）
+#   - AI_API_TOKEN    必填，对应厂商的 API Key（需支持函数调用）
+#   - AI_MODEL_NAME   必填，实际调用的模型名（如 deepseek-v4-flash / qwen-max / kimi-k2 等）。
+#                     框架经环境变量 COPILOT_DEFAULT_MODEL 读取（见 model_config.yaml），
+#                     工作流运行时将本 Secret 透传过去，从而免改代码即可切换模型。
+#   - GH_PAT          必填，GitHub PAT，需同时含以下权限：
+#                     · security_events 读权限 —— 读取本仓库 CodeQL 告警
+#                     · repo / issues 写权限   —— 创建公开跟踪 Issue 与私密安全公告
+#                     ⚠️ 仅注入 publish job（见下），triage job 绝不接触该 Secret。
+#   - MCP_CONFIG      可选，MCP Server（GitHub API）配置
+#
+# ⚠️ 注意：
+#   - 首次使用前请先用 workflow_dispatch 手动跑一次，确认链路正常。
+#   - ⚠️ 本示例会**真实创建 Issue 与私密安全公告**（仅对判定为真实漏洞、且经校验
+#     APPROVED 的告警）。为遵守 SECURITY.md 的**协调披露**原则：
+#       · 公开 Issue 仅作**脱敏占位**（标题不含 rule/path，正文只有告警编号），
+#         不在修复发布前暴露漏洞细节；
+#       · 规则名 / 文件路径 / 报告全文写进 **私密 security advisory**，仅维护者可见。
+#     发文为**幂等**操作：公开 Issue 正文首部写入 `<!-- ai-audit-alert:<编号> -->` 指纹，
+#     去重按指纹全量翻页检索；私密公告按「标题含告警编号」去重。
+#     并叠加工作流级 concurrency 串行化 + 创建后自愈，杜绝并发重复。
+#     如只想看分流结果、不修改仓库，可把 jobs.publish 整体注释掉。
+# =============================================================================
+
+name: "AI 审计（CodeQL 完成后自动分流）"
+
+on:
+  workflow_run:
+    # 监听 CodeQL.yml 的 workflow 名（.github/workflows/CodeQL.yml 的 name: "代码质量分析"）
+    workflows: ["代码质量分析"]
+    types: [completed]
+  workflow_dispatch:  # 保留手动触发，便于首次部署时验证链路
+
+permissions:
+  # 顶层默认最小权限：本工作流不依赖 GITHUB_TOKEN 的写能力（建 Issue 走 GH_PAT，
+  # 且只在 publish job 内注入），故全局只保留只读 contents。
+  contents: read
+
+# ── 并发串行化（防重复 Issue 的第一道闸） ────────────────────────────────────
+# 成因：workflow_run 由「CodeQL 完成」驱动，而 CodeQL 在 push / PR / schedule
+#       多个入口下可能**短时间内并发完成**，从而同时拉起多个本工作流实例。
+#       此时两个 publish job 会同时走到「先查是否存在、再创建」的判定点，
+#       双双读到「不存在」→ 双双 POST → 同一漏洞被建成两条 Issue。
+# 对策：把整条流水线收敛到**同一个 concurrency group**，并禁用排队取消
+#       （cancel-in-progress: false）——后来者**排队等待**前一次跑完，而不是被
+#       取消，从而保证「任一时刻只有一个 publish 在跑」，从源头掐掉竞态。
+# ⚠️ 为什么不能靠 cancel-in-progress: true？取消会让 triage 白跑且可能丢掉
+#    已经生成、但尚未发文的结论；排队才是对「审计 + 发文」原子性的正确取舍。
+concurrency:
+  # group 固定为工作流名（不掺 ref/事件），确保**所有**触发源的实例都排进同一条队列；
+  # 若按 github.ref 分组，不同分支/事件的并发实例会落入不同队列，竞态依旧。
+  group: ${{ github.workflow }}
+  # false = 排队而非取消：宁可稍等，也不并发发文
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1：审计（无 Secret、无写权限、不接触 GH_PAT）
+  # ---------------------------------------------------------------------------
+  # 这是「不可信输入」与「高权限动作」之间的隔离墙：本 job 只做只读分析，
+  # 产出结构化结论 artifact；它**永远不持有**任何可写仓库的凭据。
+  triage:
+    name: 审计分流（无凭据）
+    runs-on: ubuntu-latest
+    permissions:
+      # 只读：足够读取 CodeQL 告警与仓库内容；本 job 不持有任何仓库写凭据。
+      contents: read
+      security-events: read
+    # 门禁：
+    #   1) 手动触发直接放行；
+    #   2) workflow_run 需上游 CodeQL 成功完成（避免失败/取消的过期扫描状态）；
+    #   3) 【安全关键】上游运行的 head 仓库必须是本仓库，即 fork PR 触发的
+    #      CodeQL 运行**一律不进入本工作流**，杜绝 PR 源码充当不可信输入。
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    steps:
+      # 只读出站加固运行器（audit 模式：记录所有出站调用，便于事后审计）
+      - name: 加固运行器（审计所有出站调用）
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      # 拉取源码：只认**可信 ref**，绝不用 workflow_run 事件里的 PR head。
+      #   手动触发 -> 当前 ref（由有写权限的维护者手动发起，可信）；
+      #   workflow_run -> 本仓库默认分支（上游已在 if 中排除 fork），确保检出的是
+      #   已合并的可信代码，而非事件携带的任意提交。
+      # ⚠️ 第三方 Actions 一律锁定到已复核的不可变 commit SHA，禁用易被上游篡改的
+      #   浮动 tag（如 actions/checkout@v4）；框架同样锁定到复核过的发布 commit。
+      - name: Checkout 本项目（仅可信 ref）
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || github.event.repository.default_branch }}
+          persist-credentials: false
+
+      # 拉取 seclab-taskflow-agent 框架，固定到已复核发布的不可变 commit SHA
+      - name: Checkout seclab-taskflow-agent 框架（固定 commit）
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: GitHubSecurityLab/seclab-taskflow-agent
+          # 固定到复核过的 v0.5.0 发布 commit，而非浮动默认分支
+          ref: 6038bb4ee9661887a09215eac70fccceb396cd02 # v0.5.0
+          path: seclab-taskflow-agent
+          persist-credentials: false
+
+      - name: 把 ai-audit 复制进框架根目录 ai_audit（目录名用下划线）
+        # 框架通过 importlib.resources.files(package) 按 Python 模块路径加载
+        # taskflow / personality / model_config。运行命令使用 -t ai_audit.* 引用
+        # 顶层模块 ai_audit，因此必须把目录复制到框架仓库根目录（在 sys.path 上）。
+        run: |
+          cp -r ai-audit seclab-taskflow-agent/ai_audit
+
+      # 安装 hatch：锁定版本，避免未加约束的 pip install 拉取到被替换/污染的包
+      # ⚠️ 关键约束：同时把 virtualenv 固定到 <21（原因见历史注释，兼容 hatch 1.14.0）。
+      - name: 安装 hatch（锁定版本）
+        run: pip install hatch==1.14.0 "virtualenv<21"
+
+      # 运行 AI 审计 taskflow（消费最新 CodeQL 告警），产出结构化结论 artifact。
+      # ⚠️ 本 job 不注入 GH_PAT；读取 CodeQL 告警所需的只读令牌用 GITHUB_TOKEN
+      #   （其权限已被顶层收紧到 contents: read，且上游 CodeQL 告警读取无需写权限）。
+      #   AI_* 凭据仅用于调用 LLM，不具备任何仓库写能力。
+      - name: 运行 AI 审计 taskflow（无仓库写凭据）
+        working-directory: seclab-taskflow-agent
+        env:
+          AI_API_ENDPOINT: ${{ secrets.AI_API_ENDPOINT }}
+          AI_API_TOKEN: ${{ secrets.AI_API_TOKEN }}
+          AI_MODEL_NAME: ${{ secrets.AI_MODEL_NAME }}
+          # 只读令牌：仅用于读取 CodeQL 告警，不是 GH_PAT
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MCP_CONFIG: ${{ secrets.MCP_CONFIG }}
+          # 审计结果落盘位置，供 publish job 消费
+          AUDIT_VERDICT_FILE: /tmp/audit-verdicts.json
+        run: |
+          # 模型从仓库 Secret AI_MODEL_NAME 经 COPILOT_DEFAULT_MODEL 传入框架，
+          # 因此调用前必须确保其非空（GitHub Actions 未配置的 Secret 会解析成空串）
+          : "${AI_MODEL_NAME:?请配置仓库 Secret AI_MODEL_NAME 以指定 AI 审计所用模型}"
+          export COPILOT_DEFAULT_MODEL="${AI_MODEL_NAME}"
+          # -g repo 注入唯一仓库值：使 taskflow 的 globals.repo（**智能体任务**的
+          #   memcache 状态 key 基于它）与本 job / publish job 的实际仓库 github.repository
+          #   完全一致，杜绝「拉 A 仓库告警、却按 B 仓库的 key 审计 / 建 Issue」的仓库分裂。
+          #   ⚠️ globals.repo 只进 user_prompt（会渲染）；shell 任务的 run: 不做渲染，
+          #   故第 0 步拉取告警的仓库路径在 taskflow 里**写死**——
+          #   该写死值与这里的 github.repository 必须保持一致（同为本仓库）。
+          # -m 显式指定 model_config（声明 api_type: chat_completions；模型由上面的
+          #   COPILOT_DEFAULT_MODEL 环境变量决定，见 ai-audit/model_config.yaml）
+          hatch run main -t ai_audit.alert_triage_example \
+              -g repo="${{ github.repository }}" \
+              -m ai_audit.model_config
+          # 兜底：若 taskflow 未产出结论文件，写一个空数组，保证 artifact 存在
+          [ -f "$AUDIT_VERDICT_FILE" ] || echo '[]' > "$AUDIT_VERDICT_FILE"
+
+      # 上传审计结论（纯数据），交给下游持令牌的 publish job。
+      # 仅上传结论 JSON，不上传任何可执行产物，避免下游执行不可信代码。
+      - name: 上传审计结论 artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: audit-verdicts
+          path: /tmp/audit-verdicts.json
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Job 2：发布（唯一持有 GH_PAT 的 job）
+  # ---------------------------------------------------------------------------
+  # 本 job 的输入只有上游 artifact（结构化 JSON），字段受白名单约束，因此即便
+  # artifact 内容被污染，也无法注入工作流或命令；它不检出/不执行任何仓库源码。
+  publish:
+    name: 创建 Issue（持令牌）
+    needs: triage
+    runs-on: ubuntu-latest
+    # 仅当上游确实产出了结论时才跑
+    if: needs.triage.result == 'success'
+    permissions:
+      # 仍保持最小权限：建 Issue 走 GH_PAT，不依赖 GITHUB_TOKEN 写能力
+      contents: read
+    steps:
+      - name: 加固运行器（审计所有出站调用）
+        uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - name: 下载审计结论 artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: audit-verdicts
+          path: /tmp/audit
+
+      # ── 非智能体门禁（deterministic gate） ──────────────────────────────────
+      # 本 step 是「是否创建 Issue」的**唯一**放行点，且**全程不含任何 LLM**：
+      #   1) 只消费上游 artifact 里的结构化 JSON（纯数据）；
+      #   2) 用 jq 硬过滤 `status == "APPROVED"` + 必备字段非空；
+      #   3) 逐条创建 Issue（按 alert 指纹幂等去重 + 创建后并发自愈）。
+      # 因此「被写入 `_verdict.status != APPROVED` 的告警」在机制上**无法**进入建 Issue 路径。
+      # ⚠️ 注意边界：`_verdict` 的**内容**由 triage 阶段的 LLM 判定（属模型判断，非确定性保证）；
+      #    本门禁确定性保证的是「结论 → 发文」这一段——只认 APPROVED 字段，不做二次模型判断。
+      #    故**不要**宣称「被驳回的误报绝无可能被创建」，只能说「非 APPROVED 的告警不可能被创建」。
+      # GH_PAT 仅在本 step 注入，且只用于 GitHub API 建 Issue。
+      - name: 按审计结论创建 Issue（幂等 + 并发自愈）
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          : "${GH_PAT:?请配置仓库 Secret GH_PAT 以创建 Issue}"
+          FILE=/tmp/audit/audit-verdicts.json
+          if [ ! -f "$FILE" ]; then echo "无结论文件，跳过"; exit 0; fi
+          # 防御：结论文件必须是合法 JSON 数组，否则直接失败（不猜测、不放行）
+          jq -e 'type == "array"' "$FILE" >/dev/null \
+            || { echo "结论文件不是 JSON 数组，拒绝发文" >&2; exit 1; }
+          API="${GITHUB_API_URL:-https://api.github.com}"
+          AUTH_HEADER="Authorization: Bearer ${GH_PAT}"
+          ACCEPT_HEADER="Accept: application/vnd.github+json"
+
+          # ── 协调披露（coordinated disclosure）── 本 job 的核心约束 ───────────────
+          # ⚠️ 未修复漏洞的**可利用细节**（规则名、文件路径、PoC/报告全文）**严禁**写进
+          #    公开 Issue：那会在上游修复前把所有使用者暴露于风险之中，直接违背 SECURITY.md
+          #    的协调披露约定。
+          # 因此本 step 把交付劈成两条通道：
+          #   ① 公开 Issue —— 仅作**占位跟踪**：标题不含 rule/path，正文只有告警编号 +
+          #      「详情见私密公告」，不泄露任何可利用细节；
+          #   ② 私密安全公告（security advisory）—— 承载 rule/path/report 全文，仅
+          #      仓库维护者可见；修复发布后再由人工按需公开（或直接随 Release 致谢）。
+          # 幂等指纹仍写在**公开 Issue**正文里（HTML 注释），保证去重逻辑不变。
+          FINGERPRINT_PREFIX="<!-- ai-audit-alert:"
+
+          # 是否存在「带该指纹」的 Issue：**须翻页遍历全部 open Issue**。
+          # ⚠️ 只取 `?per_page=100` 首页会漏判：open Issue 超 100 条时，排在 100 名
+          #    之后的既有 Issue 查不到 → 误判「不存在」→ 重复创建。这里逐页拉取直到取空。
+          find_issue_by_fingerprint() {
+            local fp="$1" page=1 found=""
+            while : ; do
+              local batch
+              batch="$(curl -fsSL -H "${AUTH_HEADER}" -H "${ACCEPT_HEADER}" \
+                "${API}/repos/${REPO}/issues?state=open&per_page=100&page=${page}")" \
+                || { echo "拉取 open Issue 第 ${page} 页失败" >&2; return 2; }
+              # 防御：必须是 JSON 数组（API 异常时可能返回对象，如限流/错误体）
+              jq -e 'type == "array"' <<<"$batch" >/dev/null \
+                || { echo "open Issue 第 ${page} 页非 JSON 数组，拒绝继续" >&2; return 2; }
+              local n
+              n="$(jq 'length' <<<"$batch")"
+              [ "$n" -eq 0 ] && break
+              # 只认 issue（排除 PR：PR 也会出现在 /issues 里，带 pull_request 字段）
+              found="$(jq -r --arg fp "$fp" \
+                '[.[] | select((.pull_request | not) and ((.body // "") | contains($fp)))]
+                 | if length > 0 then (.[0].number | tostring) else "" end' <<<"$batch")"
+              [ -n "$found" ] && { printf '%s' "$found"; return 0; }
+              [ "$n" -lt 100 ] && break
+              page=$((page + 1))
+            done
+            return 0
+          }
+
+          # ── 私密公告的去重判据：用 advisory 标题里的告警指纹 ──────────────────────
+          # 公告标题固定为 `AI审计：CodeQL 告警 #<alert_number>`，先查是否已建同号公告，
+          # 命中则跳过，避免同一条告警重复开公告（公告写接口非幂等）。
+          find_advisory_by_alert() {
+            local alert="$1" page=1 found=""
+            while : ; do
+              local batch
+              batch="$(curl -fsSL -H "${AUTH_HEADER}" -H "${ACCEPT_HEADER}" \
+                "${API}/repos/${REPO}/security-advisories?per_page=100&page=${page}")" \
+                || { echo "拉取 security advisory 第 ${page} 页失败" >&2; return 2; }
+              jq -e 'type == "array"' <<<"$batch" >/dev/null \
+                || { echo "security advisory 第 ${page} 页非 JSON 数组，拒绝继续" >&2; return 2; }
+              local n
+              n="$(jq 'length' <<<"$batch")"
+              [ "$n" -eq 0 ] && break
+              found="$(jq -r --arg a "告警 #${alert}" \
+                '[.[] | select((.summary // "") | contains($a))]
+                 | if length > 0 then (.[0].ghsa_id // "") else "" end' <<<"$batch")"
+              [ -n "$found" ] && { printf '%s' "$found"; return 0; }
+              [ "$n" -lt 100 ] && break
+              page=$((page + 1))
+            done
+            return 0
+          }
+
+          # 只处理校验通过（APPROVED）且必备字段齐全的条目；字段全部按字符串使用，
+          # 经 jq 转义后写入 JSON body，杜绝命令/JSON 注入。
+          COUNT="$(jq '[.[] | select(.status=="APPROVED")
+                             | select((.rule//"")!="" and (.path//"")!=""
+                                      and (.alert_number//"")!="")]
+                        | length' "$FILE")"
+          echo "待处理结论数：$COUNT"
+          if [ "$COUNT" -eq 0 ]; then echo "无可发布结论，跳过"; exit 0; fi
+
+          CREATED=0
+          SKIPPED=0
+          ADVISORY=0
+          while IFS= read -r item; do
+              RULE="$(jq -r '.rule' <<<"$item")"
+              PATH_="$(jq -r '.path' <<<"$item")"
+              ALERT="$(jq -r '.alert_number' <<<"$item")"
+              REPORT="$(jq -r '.report // ""' <<<"$item")"
+              # ⚠️ 公开标题**不含** rule/path（二者属可利用细节），仅以告警编号区分；
+              #    维护者可凭编号到私密公告里查看对应的规则与文件。
+              TITLE="[AI审计] CodeQL 告警 #${ALERT}"
+              FINGERPRINT="${FINGERPRINT_PREFIX}${ALERT} -->"
+
+              # ── ① 先投私密公告（承载细节），未成功则**不建公开 Issue** ─────────────
+              # 顺序很关键：先确保细节有私密落点，再建公开占位；否则一旦公告写入失败
+              # 而公开 Issue 已建，就会出现「公开无细节、私密无记录」的悬空跟踪项。
+              ADVISORY_ID="$(find_advisory_by_alert "$ALERT" || true)"
+              if [ -z "$ADVISORY_ID" ]; then
+                # 说明：一次成型成 payload，**不要**先把 description 单独 jq 成字符串再
+                #      用 --arg 传入——那会把已是 JSON 字符串的中转值再包一层引号，
+                #      导致公告正文出现多余的双引号。故这里把字段直接内联进同一 jq 程序。
+                ADVISORY_PAYLOAD="$(jq -n \
+                  --arg summary "AI审计：CodeQL 告警 #${ALERT}" \
+                  --arg r "$REPORT" --arg a "$ALERT" \
+                  --arg ru "$RULE" --arg p "$PATH_" \
+                  '{summary:$summary,
+                    description:("## 漏洞概述\n\n\($r)\n\n## 关联 CodeQL 告警\n\n- 告警编号：\($a)\n- 规则：\($ru)\n- 文件：\($p)\n\n## 处置约定\n\n- 本公告为 AI 审计自动创建的**私密**安全公告，仅维护者可见，用于在协调披露期内跟踪未修复漏洞。\n- 修复发布后，请按 SECURITY.md 的协调披露约定致谢并公开必要信息。"),
+                    severity:"medium", vulnerabilities:[]}')"
+                ADVISORY_ID="$(curl -fsSL -X POST -H "${AUTH_HEADER}" \
+                  -H "${ACCEPT_HEADER}" \
+                  "${API}/repos/${REPO}/security-advisories" \
+                  -d "$ADVISORY_PAYLOAD" | jq -r '.ghsa_id // ""')"
+                if [ -z "$ADVISORY_ID" ] || [ "$ADVISORY_ID" = "null" ]; then
+                  echo "私密公告创建失败，跳过该告警（不建公开 Issue）：#${ALERT}" >&2
+                  SKIPPED=$((SKIPPED + 1))
+                  continue
+                fi
+                ADVISORY=$((ADVISORY + 1))
+                echo "已创建私密公告：${ADVISORY_ID}（告警 #${ALERT}）"
+              fi
+
+              # 第一道去重（乐观预检）：命中即跳过，省下一次创建调用。
+              # 注意：并发窗口下这一步只是「快速路径」，**不是**正确性保证，
+              #       正确性由后续的创建后自愈兜底（见下）。
+              EXIST="$(find_issue_by_fingerprint "$FINGERPRINT" || true)"
+              if [ -n "$EXIST" ]; then
+                echo "已存在（#${EXIST}），跳过：$TITLE"
+                SKIPPED=$((SKIPPED + 1))
+                continue
+              fi
+
+              # ── ② 公开 Issue：仅占位，不含任何可利用细节 ─────────────────────────
+              # 用 jq 组装 body，确保内容被正确转义（不拼接裸字符串）。
+              # 指纹标记置于正文首部（HTML 注释，用户不可见），供后续精确去重。
+              BODY="$(jq -n --arg a "$ALERT" --arg g "$ADVISORY_ID" --arg fp "$FINGERPRINT" \
+                '($fp + "\n> 由 AI 审计自动创建（CodeQL 告警分流）。\n\n"
+                  + "本 Issue 仅作**跟踪占位**：为遵守 SECURITY.md 的协调披露原则，"
+                  + "漏洞的可利用细节（规则、文件、报告）**不在公开渠道披露**。\n\n"
+                  + "- 关联 CodeQL 告警编号：" + $a + "\n"
+                  + "- 私密详情：安全公告 `" + $g + "`（仅维护者可见）\n\n"
+                  + "## 处置约定\n\n"
+                  + "- 修复发布前，请勿在公开 Issue / PR / 讨论区披露漏洞细节。\n"
+                  + "- 修复完成后关闭本 Issue，并按 SECURITY.md 致谢。")')"
+              PAYLOAD="$(jq -n --arg t "$TITLE" --arg b "$BODY" \
+                '{title:$t, body:$b, labels:["security","ai-audit"]}')"
+
+              NEW_ID="$(curl -fsSL -X POST -H "${AUTH_HEADER}" \
+                -H "${ACCEPT_HEADER}" \
+                "${API}/repos/${REPO}/issues" \
+                -d "$PAYLOAD" | jq -r '.number')"
+              echo "已创建：#${NEW_ID} ${TITLE}"
+              CREATED=$((CREATED + 1))
+
+              # ── 创建后自愈（并发兜底） ──────────────────────────────────────
+              # 对抗「检查与创建之间」的 TOCTOU 窗口：若临界区里另一个并发实例
+              # 已抢先建了同一指纹的 Issue，此刻会存在 ≥2 条。按照「保留编号最小
+              # （最早创建）」的确定性规则，把本条（编号较大）自我关闭，保证收敛
+              # 到唯一一条 open Issue，无需人工清理。
+              # 说明：本工作流已用 concurrency 串行化，此处自愈属**纵深防御**——
+              #       即便未来有人去掉 concurrency 或 GitHub 偶发重放，也能自愈。
+              DUP_OF="$(find_issue_by_fingerprint "$FINGERPRINT" || true)"
+              if [ -n "$DUP_OF" ] && [ "$DUP_OF" != "$NEW_ID" ] \
+                 && [ "$DUP_OF" -lt "$NEW_ID" ]; then
+                echo "检测到并发重复（保留 #${DUP_OF}），自我关闭 #${NEW_ID}" >&2
+                curl -fsSL -X PATCH -H "${AUTH_HEADER}" -H "${ACCEPT_HEADER}" \
+                  "${API}/repos/${REPO}/issues/${NEW_ID}" \
+                  -d "$(jq -n --arg b "$(printf '%s\n\n%s' \
+                    "> 本条为并发竞态产生的重复 Issue，已自动关闭。" \
+                    "> 同一告警的正式跟踪 Issue：见 #${DUP_OF}。")" '{state:"closed", body:$b}')" \
+                  > /dev/null
+                CREATED=$((CREATED - 1))
+                SKIPPED=$((SKIPPED + 1))
+              fi
+          done < <(jq -c '.[] | select(.status=="APPROVED")
+                             | select((.rule//"")!="" and (.path//"")!=""
+                                      and (.alert_number//"")!="")' "$FILE")
+
+          echo "发布完成：新建公开 Issue ${CREATED} 条，私密公告 ${ADVISORY} 条，跳过 ${SKIPPED} 条"
+
+
+# ---------------------------------------------------------------------------
+# 说明：本工作流已由 schedule（cron 时间差）改为 workflow_run 触发，
+#       因此不再依赖 cron 表达式。若后续想额外保留定时触发以做兜底，
+#       可在上方 on 下追加 schedule 块，例如：
+#   on:
+#     workflow_run:
+#       workflows: ["代码质量分析"]
+#       types: [completed]
+#     schedule:
+#       - cron: "30 0 * * 1"   # 每周一 UTC 00:30（兜底）
+#     workflow_dispatch:
+# ---------------------------------------------------------------------------

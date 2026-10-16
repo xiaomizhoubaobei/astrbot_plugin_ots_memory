@@ -1,0 +1,403 @@
+# =============================================================================
+# AI 审计 Taskflow 测试示例 — Python 仓库（已按官方 GRAMMAR 语法适配）
+# =============================================================================
+# 用途：对 CodeQL 静态扫描在本仓库（main.py / client.py）产生的安全告警做 AI 分流。
+# 框架：GitHubSecurityLab/seclab-taskflow-agent
+# 说明：
+#   - 本文件是一个“测试用示例”，用于验证 AI 审计链路能跑通
+#     （CodeQL 告警 -> 信息收集 -> 审计 -> 报告 -> 校验 -> 产出结构化结论）。
+#   - 阶段间数据贯通：第 1~4 步均为**智能体任务**，通过 memcache（按 alert_number 为 key）
+#     把前一步的取证/判定/报告传给下一步；末步只**落地结构化结论文件**（不建 Issue）。
+#     ⚠️ 末步是**纯 shell 任务**，因此**不得**在其中调用 memcache 的 MCP 工具
+#     （memcache_get_state 等只在智能体上下文可用），也**不能**依赖 `{{ result.* }}` /
+#     `{{ globals.* }}`（shell 任务不参与 repeat_prompt 扇出，run 也不做模板渲染）。
+#     末步改为自行解析 memcache 落盘目录、直接读文件后做确定性过滤，详见该步注释。
+#     Issue 的创建由持令牌的独立 job（.github/workflows/ai-audit-scheduled.yml 的
+#     publish job）消费该结论后完成——「不可信输入」与「高权限动作」由此物理隔离，
+#     本 taskflow 全程不需要 GH_PAT。原“即时知识回流”因无法在创建后立即获得
+#     人工反馈而移除（见文末说明）。
+#   - ⚖️ 确定性边界：第 4 步的 _verdict（APPROVED/REJECTED）是 **LLM 判定**，属模型判断，
+#     不保证永远正确；能确定性保证的是「结论 → 发文」这段把关——末步（纯 shell）与
+#     publish job（纯 shell）都只认 _verdict.status == APPROVED 字段，**全程无第二个 LLM**。
+#     故只可宣称「凡 _verdict.status 非 APPROVED 的告警，机制上不可能被创建 Issue」，
+#     不可宣称「被驳回的误报绝无可能被创建」（后者取决于模型判定本身是否可靠）。
+#   - 已按官方 doc/GRAMMAR.md 语法编写：seclab-taskflow-agent 头部 + filetype: taskflow、
+#     顶层 taskflow key、agents 引用 personalities、shell run 任务 + outputs JSON Schema 校验、
+#     repeat_prompt/over 批量循环等。
+#   - 为适配本项目（Python），使用项目自带的 Python 审计人格
+#     ai_audit.personalities.python_auditer，而非官方默认的 C 语言人格
+#     c_auditer（详见 personalities/python_auditer.yaml）。
+#   - 引用路径 ai_audit.* 假设已将 ai-audit 目录（重命名为 ai_audit）
+#     复制到框架仓库根目录（而非 examples/，那样会变成 examples.ai_audit 导致
+#     模块路径对不上）；详见 README.md 的部署说明。
+#   - 请先阅读同目录下的 README.md 了解运行前提（LLM 配置、GitHub PAT、MCP Server、人格模块路径）。
+#
+# 适配语言：Python
+# 告警输入：由 .github/workflows/CodeQL.yml 扫描产出的 CodeQL 安全告警
+# 运行方式：hatch run main -t ai_audit.alert_triage_example （详见 README.md 部署说明）
+# 输出：结构化审计结论 JSON，路径由环境变量 AUDIT_VERDICT_FILE 指定
+#       （默认 /tmp/audit-verdicts.json），供下游持令牌 job 消费后创建 Issue。
+# =============================================================================
+
+seclab-taskflow-agent:
+  version: "1.0"
+  filetype: taskflow
+
+# 可选：引入模型配置（参照 examples/model_configs/），如无需可删除本行
+# model_config: examples.model_configs.model_config
+
+# 仓库名（owner/repo）：用于**智能体任务**（user_prompt 会做 Jinja 渲染）里的
+# memcache key 前缀，标识审计对象；也可通过 -g repo=... 覆盖。
+# ⚠️ 它**不会**注入 shell 任务的 run:（框架不渲染 run:），故第 0 步拉取告警的
+#    仓库路径改为在该步 run 里**写死**；两处值必须保持一致（见该步注释）。
+globals:
+  repo: xiaomizhoubaobei/astrbot_plugin_ots_memory
+
+taskflow:
+  # ---------------------------------------------------------------------------
+  # 0) 准备：从 GitHub Code Scanning API 拉取「全部 open 的 CodeQL 告警」。
+  #    生成待审计告警的 JSON 可迭代列表，供后续 repeat_prompt 批量循环。
+  #    通过 id + outputs（JSON Schema）暴露为命名输出 outputs.alerts。
+  #    （分页：Code Scanning API 单页上限 100，此处逐页拉取直到取完，
+  #     避免仓库告警超过 100 条时其余告警被漏审。）
+  # ---------------------------------------------------------------------------
+  - task:
+      must_complete: true
+      id: alerts
+      run: |
+        # 失败即停：curl 拉取/JSON 解析一旦出错，宁可让本任务明确失败（must_complete 会
+        # 阻断后续），也不要「静默继续」——静默继续会让累积 JSON 残缺、告警被漏审。
+        set -euo pipefail
+        # 需要 GITHUB_TOKEN（PAT，含 security_events 读权限）来读取 CodeQL 告警
+        : "${GITHUB_TOKEN:?请设置 GITHUB_TOKEN 环境变量以读取 CodeQL 告警}"
+        # 仓库路径【写死】在此处（owner/repo），不引用 {{ globals.repo }}：
+        #   框架只对 user_prompt 做 Jinja 渲染，**shell 任务的 run: 原样交给 bash 执行**
+        #   （见框架 runner.py：shell 分支直接 shell_tool_call(run)，不经 render_template）。
+        #   因此 run: 里的 {{ globals.repo }} 只会是**死字面量**，会拼出
+        #   `https://api.github.com/repos/{{ globals.repo }}/...` 这种非法 URL → 告警拉取必失败。
+        #   故此处直接写死仓库路径，保证拉取端点正确。
+        # ⚠️ 一致性约束：本值必须与上方 globals.repo 及 workflow 传入的
+        #   -g repo="${{ github.repository }}" **完全一致**——globals.repo 用于
+        #   智能体任务（user_prompt 会渲染）里的 memcache key，若两者不一致会
+        #   重新引入「拉 A 仓库告警、却按 B 仓库的 key 审计 / 建 Issue」的仓库分裂。
+        _REPO="xiaomizhoubaobei/astrbot_plugin_ots_memory"
+        : "${_REPO:?仓库路径未设置（owner/repo）}"
+        # 有界网络参数：宁可单页请求失败后重试，也不让 curl 无限期挂起。
+        #   --connect-timeout 10  建连超时
+        #   --max-time 60         单页总超时（含传输），防止连接建立后长时间无响应
+        #   --retry 3             传输层瞬时错误（连接重置/超时/5xx）重试 3 次
+        #   --retry-all-errors    让上面的重试覆盖更多瞬时错误（否则仅重试部分错误码）
+        #   --retry-delay 2       重试间隔 2 秒（避免打爆上游且给限流留恢复时间）
+        _CURL_OPTS=(--connect-timeout 10 --max-time 60 --retry 3 --retry-all-errors --retry-delay 2)
+        # 翻页硬上限：即便上游持续返回整页（异常/被重定向到总返回 100 条的端点），
+        # 也不会无限翻页，最坏情况在本上限处明确失败，而不是拖到 workflow 超时。
+        _MAX_PAGES=200
+        # 逐页拉取全部 open 的 CodeQL 告警（单页 100，>100 时继续翻页），累积到同一数组。
+        # 关键：以 jq 的数组拼接('+')来累积，空页([])天然被吞掉，
+        # 不依赖「手工去掉首尾方括号再拼逗号」那种字符串黑魔法——
+        # 后者在告警数恰为 100 的整数倍时会多拉一页空页，被拼成尾随逗号，
+        # 令后续 jq 解析失败、整批告警静默漏审。
+        # 累积结果一律走**临时文件**，不塞进 shell 变量 / argv：
+        # 既避免大仓库（告警上万条）时触发 ARG_MAX（"Argument list too long"），
+        # 也让每页拼接是纯文件级 jq 操作，无字符串黑魔法。
+        _ACC_FILE="$(mktemp)"
+        _PAGE_FILE="$(mktemp)"
+        trap 'rm -f "$_ACC_FILE" "$_PAGE_FILE"' EXIT
+        # 累加器初始为空数组（空页 [] 是数组拼接的单位元，天然被吞掉，不留尾随逗号）
+        echo '[]' > "$_ACC_FILE"
+        _PAGE=1
+        while :; do
+          if [ "$_PAGE" -gt "$_MAX_PAGES" ]; then
+            echo "ERROR: 翻页超过硬上限 ${_MAX_PAGES} 页仍未取完 CodeQL 告警，疑似上游异常。" >&2
+            exit 1
+          fi
+          # 显式判 curl 退出码：失败即报错退出，绝不带着空 body 继续往下走。
+          if ! _BODY="$(curl -fsSL "${_CURL_OPTS[@]}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/${_REPO}/code-scanning/alerts?state=open&tool_name=CodeQL&per_page=100&page=${_PAGE}")"; then
+            echo "ERROR: 拉取 CodeQL 告警失败（repo=${_REPO} page=${_PAGE}），已重试仍不成功，停止翻页。" >&2
+            exit 1
+          fi
+          # 本页先落盘，再校验「是否为合法 JSON 数组」；解析失败说明响应异常（如错误页/HTML），
+          # 此时立即失败退出，避免把坏数据拼进累积结果、或让循环读到空长度而空转。
+          printf '%s' "$_BODY" > "$_PAGE_FILE"
+          if ! _PAGE_LEN="$(jq -er 'if type == "array" then length else error("not an array") end' "$_PAGE_FILE")"; then
+            echo "ERROR: 第 ${_PAGE} 页响应不是合法 JSON 数组，无法解析（repo=${_REPO}）。" >&2
+            exit 1
+          fi
+          # 文件级拼接本页到累加器（改写回同一文件，故用临时中转避免读到半截）
+          jq -c -s '.[0] + .[1]' "$_ACC_FILE" "$_PAGE_FILE" > "${_ACC_FILE}.tmp" \
+            && mv "${_ACC_FILE}.tmp" "$_ACC_FILE"
+          # 不足一页（含空页）说明已到末页，收工
+          if [ "$_PAGE_LEN" -lt 100 ]; then
+            break
+          fi
+          _PAGE=$((_PAGE+1))
+        done
+        # 统一映射成下游结构并写命名输出 outputs.alerts。
+        # 先确保累积结果本身是合法 JSON 数组，再映射；解析失败即报错退出，
+        # 避免产出半截/空文件让下游把「解析失败」误当成「无告警」。
+        if ! jq -e 'type == "array"' "$_ACC_FILE" > /dev/null; then
+          echo "ERROR: 累积告警 JSON 非法（repo=${_REPO}），停止。" >&2
+          exit 1
+        fi
+        jq -c '
+              map({
+                alert_number: .number,
+                rule: (.rule.id // .rule.description // "unknown"),
+                path: (.most_recent_instance.location.path // "unknown"),
+                message: (.most_recent_instance.message.text // "")
+              })
+            ' "$_ACC_FILE" > /tmp/alerts.json
+        cat /tmp/alerts.json
+        # 无告警时给 stderr 写一条明确提示，避免下游 repeat_prompt 反复输出空迭代告警
+        # （提示写入 stderr，不污染 stdout 的纯 JSON，保证命名输出可被正确解析）
+        if [ "$(jq 'length' /tmp/alerts.json)" -eq 0 ]; then
+          echo "INFO: 仓库 ${_REPO} 当前没有 open 的 CodeQL 告警，无需 AI 分流，任务提前正常结束。" >&2
+        fi
+      outputs:
+        type: array
+        items:
+          type: object
+          properties:
+            alert_number:
+              type: integer
+            rule:
+              type: string
+            path:
+              type: string
+            message:
+              type: string
+          required: [alert_number, rule, path, message]
+
+  # ---------------------------------------------------------------------------
+  # 1) 信息收集：调 GitHub API / MCP Server 拿告警上下文（触发点、调用链、权限），
+  #    并把「每一条告警的取证结果」落到以告警为 key 的 memcache，供第 2~4 步消费。
+  #    （框架 repeat_prompt 每步默认只把原始告警喂给 {{ result }}，跨步骤结果需要
+  #      显式经 memcache 按 alert_number 贯通，否则第 2~4 步将看不到上一步结论。）
+  # ---------------------------------------------------------------------------
+  - task:
+      must_complete: true
+      if: "outputs.alerts | length > 0"
+      repeat_prompt: true
+      over: "outputs.alerts"
+      agents:
+        - ai_audit.personalities.python_auditer
+      user_prompt: |
+        你是一名 Python 安全审计员。针对以下 CodeQL 安全告警 {{ result.alert_number }}
+        （规则：{{ result.rule }}，文件：{{ result.path }}，描述：{{ result.message }}），
+        调用可用的 MCP Server（如 GitHub API / CodeQL toolbox）收集信息：
+        - 告警的 source（来源点）与 sink（汇点）在该 Python 文件中的精确行号；
+        - 告警路径上是否有用户输入（不可信数据）流入（如聊天消息、指令参数、URL 参数、请求体、环境变量）；
+        - 该代码路径是否在特权/高权限上下文（如服务端处理、凭证处理、文件系统操作、子进程调用）中执行；
+        - 该告警触发的输入是否真的可被外部攻击者控制。
+        调用 memcache_set_state 把取证结果存为一条 JSON，key 为
+        "{{ globals.repo }}_{{ result.alert_number }}_evidence"，value 形如：
+        {"source":"文件:行号","sink":"文件:行号","user_input_controlled":true|false,
+         "privileged_context":true|false,"notes":"..."}
+        不得编造，无法取证的字段写 null 并在 notes 说明。
+
+  # ---------------------------------------------------------------------------
+  # 2) 审计：剔除误报（攻击者能否触发？是否特权上下文？）
+  #    读取第 1 步写入的 _evidence 取证结果，基于它而非凭空判定。
+  # ---------------------------------------------------------------------------
+  - task:
+      must_complete: true
+      if: "outputs.alerts | length > 0"
+      repeat_prompt: true
+      over: "outputs.alerts"
+      agents:
+        - ai_audit.personalities.python_auditer
+      user_prompt: |
+        针对告警 {{ result.alert_number }}（规则：{{ result.rule }}，文件：{{ result.path }}）：
+        1. 调用 memcache_get_state 读取 key "{{ globals.repo }}_{{ result.alert_number }}_evidence"
+           取得第 1 步的取证结果（若不存在则直接判定为证据不足，输出 FP）。
+        2. 基于取证结果判定是否真实漏洞：
+           - 攻击者无法触发该路径，或输入不可控 => 误报 FP；
+           - 在特权上下文执行且输入可控 => 潜在漏洞 TP。
+        3. 调用 memcache_set_state 把判定写入 key "{{ globals.repo }}_{{ result.alert_number }}_triage"，
+           value 形如 {"decision":"FP"|"TP","reasons":["...","..."]}。
+        若证据不存在或无法支撑 TP，一律判 FP，防止凭空/幻觉升级。
+
+  # ---------------------------------------------------------------------------
+  # 3) 生成漏洞报告（带精确文件+行号引用）：仅对第 2 步判定为 TP 的告警写报告，
+  #    并把报告落到 memcache 供第 4 步校验、第 5 步创建 Issue 复用。
+  # ---------------------------------------------------------------------------
+  - task:
+      must_complete: true
+      if: "outputs.alerts | length > 0"
+      repeat_prompt: true
+      over: "outputs.alerts"
+      agents:
+        - ai_audit.personalities.python_auditer
+      user_prompt: |
+        针对告警 {{ result.alert_number }}（规则：{{ result.rule }}，文件：{{ result.path }}）：
+        1. 调用 memcache_get_state 读取 key "{{ globals.repo }}_{{ result.alert_number }}_evidence"
+           与 "{{ globals.repo }}_{{ result.alert_number }}_triage"，确认 decision 是否为 TP。
+        2. 仅当 decision==TP 时，基于取证结果生成完整漏洞报告（含漏洞类型、严重程度、
+           精确 source/sink 文件+行号、攻击路径、修复建议）。
+        3. 调用 memcache_set_state 把报告写入 key "{{ globals.repo }}_{{ result.alert_number }}_report"，
+           value 为报告全文（Markdown）。
+        若为误报(FP)或证据不足，则调用 memcache_delete_state 删除该 _report key
+        （确保后续创建 Issue 时读不到任何报告，从而被跳过）。
+
+  # ---------------------------------------------------------------------------
+  # 4) 校验：报告不完整/不一致=幻觉，直接驳回。
+  #    本步必须**同时读取 _evidence 与 _report**，基于取证核对报告的文件/行号；
+  #    若 _evidence 缺失则一律驳回（no_evidence），绝不放行未验证的行号。
+  #    产出结构化的校验结论（_verdict：APPROVED/REJECTED），供第 5 步筛选出「否决的结论」。
+  #    ⚠️ 本步产出的是 **LLM 判定**（某告警是否算真实漏洞，属模型判断，非确定性保证）；
+  #       确定性的把关在**下游**：第 5 步与 publish job 均只认 status==APPROVED 字段的
+  #       纯 shell 门禁（无 LLM）。故此处的 APPROVED/REJECTED 是「结论内容」，
+  #       而非「机制上不可绕过」的证明——不要过度宣称模型判定不会出错。
+  # ---------------------------------------------------------------------------
+  - task:
+      must_complete: true
+      if: "outputs.alerts | length > 0"
+      repeat_prompt: true
+      over: "outputs.alerts"
+      agents:
+        - ai_audit.personalities.python_auditer
+      user_prompt: |
+        针对告警 {{ result.alert_number }}（规则：{{ result.rule }}，文件：{{ result.path }}）：
+        1. 调用 memcache_get_state 同时读取两个 key：
+           - "{{ globals.repo }}_{{ result.alert_number }}_report"（第 3 步报告）；
+           - "{{ globals.repo }}_{{ result.alert_number }}_evidence"（第 1 步取证）。
+           ⚠️ 校验必须基于 _evidence，否则无从核对报告里的文件/行号，等于放行未验证的行号。
+        2. 若报告不存在或为空（FP / 未写报告），直接写入校验结论
+           key "{{ globals.repo }}_{{ result.alert_number }}_verdict"，
+           value 形如 {"status":"REJECTED","reason":"no_report"} 并结束。
+        3. 若 _evidence 不存在或为空，则无法核对报告位置，一律按证据不足驳回：
+           value 形如 {"status":"REJECTED","reason":"no_evidence"} 并结束。
+           **不得**在缺少取证内容时给出 APPROVED。
+        4. 否则基于 _evidence 逐项校验报告：
+           - 报告中的文件/行号是否与 _evidence 的 source/sink 一致？
+           - 是否缺少关键字段（漏洞类型/位置/攻击路径/修复建议）？
+           - 是否含未渲染的模板变量占位（以左双大括号开头的 Jinja 残留）？
+           只要任一不满足即判定幻觉/不完整。
+        5. 调用 memcache_set_state 写入校验结论
+           key "{{ globals.repo }}_{{ result.alert_number }}_verdict"，
+           value 必须**自包含**（含下游落盘所需的全部字段，勿只写 status/reason）：
+           {"alert_number": {{ result.alert_number }}, "rule": {{ result.rule | tojson }},
+            "path": {{ result.path | tojson }}, "status": "APPROVED"|"REJECTED",
+            "reason": "<简短原因>",
+            "report": "<该告警的报告全文；被驳回或报告为空时填空字符串 \"\">"}
+           其中 report 若为 APPROVED 必须是第 3 步报告的**原文全文**（Markdown）。
+           ⚠️ 必须把 rule/path 也写进来：第 5 步是纯 shell、拿不到上游的 `{{ result.* }}`
+           （shell 任务不做模板渲染），只能依赖本键里的自包含字段。
+        本步只写 _verdict，不创建任何 Issue。
+
+  # ---------------------------------------------------------------------------
+  # 5) 落地结构化审计结论：仅对「校验结论为 APPROVED」的告警，产出一条结构化 JSON，
+  #    追加写入 AUDIT_VERDICT_FILE（默认 /tmp/audit-verdicts.json），作为后续
+  #    「创建 Issue」的唯一输入。
+  #    ⚠️ 本步**不创建任何 Issue**、不调用任何 GitHub 写接口：它只是把结论落盘。
+  #    真正的 Issue 创建由持令牌的独立 job（ai-audit-scheduled.yml 的 publish job）
+  #    消费该文件后完成，从而把「不可信输入（告警/仓库内容）」与「高权限动作（建 Issue）」
+  #    物理隔离；本 job 因此无需 GH_PAT，也不需要 github_official 写工具集。
+  #    本步为**纯 shell（无 LLM）**：按 status==APPROVED 字段硬过滤，字段全部经 jq 转义
+  #    后写入 JSON，杜绝注入。它与 publish job 的 jq 过滤共同构成**非智能体门禁**——
+  #    凡 _verdict.status 非 APPROVED 的告警，机制上无法进入建 Issue 路径。
+  #    ⚖️ 边界：_verdict 的内容是第 4 步 LLM 的判定，非确定性保证；此处只保证
+  #       「按已写入的结论字段做确定性过滤」，不宣称模型判定不会出错。
+  # ---------------------------------------------------------------------------
+  - task:
+      must_complete: true
+      if: "outputs.alerts | length > 0"
+      # 注意：本步**不设** repeat_prompt/over——shell 任务不参与扇出（框架 fans_out 恒为 false），
+      # 且 run: 不做模板渲染，设了也不会逐告警执行，反而误导读者以为可迭代。
+      # ⚠️ 本步是**纯 shell 任务（run:）且刻意不带任何 toolboxes**——这不是省略，而是硬约束：
+      #    框架只把 MCP 工具暴露给**智能体任务**（MCP server 挂到 agent 上），
+      #    纯 shell 任务里 `memcache_get_state` **不是可执行命令**，调用只会
+      #    `command not found`（再被 `2>/dev/null || true` 吞掉）→ `_STATUS` 恒为空 →
+      #    恒判 SKIP → **每条告警被静默跳过、全量漏审**。
+      #    另两条同源硬约束（同样决定本步写法）：
+      #      · shell 任务**不参与 repeat_prompt 扇出**（框架 fans_out 恒为 false），
+      #        `run:` 只会执行一次，故不可用 `{{ result.alert_number }}` 逐告警迭代；
+      #      · `run:` 字段**不会被框架做 Jinja 渲染**（只渲染 user_prompt），
+      #        故 `{{ globals.repo }}` / `{{ result.* }}` 在 run 里都是死字面量。
+      #    正确做法：**脚本自己**按框架同一套规则解析 memcache 落盘路径、直接读文件
+      #    （不依赖任何 MCP 工具/模板渲染），再对第 4 步写入的自包含 `_verdict` 做确定性过滤。
+      #
+      # 保持「纯 shell（无 LLM）」：它只做确定性字段过滤——仅挑 status==APPROVED 且
+      # report 非空的记录落盘，字段全部经 jq 转义。它本身就是**非智能体门禁**的一半
+      # （另一半在 publish job），保证「凡 status 非 APPROVED 的结论，机制上无法进入建 Issue 路径」。
+      run: |
+        set -euo pipefail
+        # 定位 memcache 落盘目录：优先用 MEMCACHE_STATE_DIR（与 memcache toolbox 的 env 语义一致），
+        # 未设置时回落到框架自身的解析器（platformdirs 规则；CI（Linux/root）下为
+        # ~/.local/share/seclab-taskflow-agent/seclab-taskflow-agent/memcache）。
+        _MC_DIR="${MEMCACHE_STATE_DIR:-}"
+        if [ -z "$_MC_DIR" ]; then
+          _MC_DIR="$(python3 -c 'from seclab_taskflow_agent.path_utils import mcp_data_dir; print(mcp_data_dir("seclab-taskflow-agent","memcache","MEMCACHE_STATE_DIR"))' 2>/dev/null || true)"
+        fi
+        # 防御：解析不到目录时**明确失败**，绝不静默产出空结论（否则等同漏审）。
+        if [ -z "$_MC_DIR" ] || [ ! -d "$_MC_DIR" ]; then
+          echo "ERROR: 无法定位 memcache 落盘目录（MEMCACHE_STATE_DIR=${MEMCACHE_STATE_DIR:-<unset>}），拒绝静默跳过。" >&2
+          exit 1
+        fi
+        # 读取全部键值（兼容两种后端：sqlite 默认 memory.db / dictionary_file 的 memory.json），
+        # 统一导出为扁平 JSON 对象 {key: value}，供后续 jq 过滤。
+        _KV="$(python3 - "$_MC_DIR" <<'PY'
+        import json, os, sqlite3, sys
+        d = sys.argv[1]
+        db, js = os.path.join(d, "memory.db"), os.path.join(d, "memory.json")
+        if os.path.isfile(db):
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)  # 只读打开，避免与 MCP 进程争写锁
+            out = {}
+            for key, value in con.execute("SELECT key, value FROM key_value"):
+                try:
+                    out[key] = json.loads(value)
+                except Exception:
+                    out[key] = value
+            print(json.dumps(out))
+        elif os.path.isfile(js):
+            with open(js, encoding="utf-8") as fh:
+                print(fh.read())
+        else:
+            sys.stderr.write(f"ERROR: {d} 下既无 memory.db 也无 memory.json。\n")
+            sys.exit(1)
+        PY
+        )"
+        # 防御：memcache 内容必须是合法 JSON 对象
+        if ! printf '%s' "$_KV" | jq -e 'type == "object"' > /dev/null 2>&1; then
+          echo "ERROR: memcache 落盘内容不是合法 JSON 对象，无法落地结论。" >&2
+          exit 1
+        fi
+        # 取全部 <repo>_<alert>_verdict 键，仅保留自包含、status==APPROVED 且 report 非空的记录。
+        # （rule/path/alert_number 均来自第 4 步写入的自包含 _verdict，本步不依赖上游 result。）
+        _APPROVED="$(printf '%s' "$_KV" | jq -c '
+          [ to_entries[]
+            | select(.key | endswith("_verdict"))
+            | .value
+            | select(type == "object")
+            | select(.status == "APPROVED")
+            | select((.report // "") | type == "string" and length > 0)
+            | { alert_number: (.alert_number // null),
+                rule: (.rule // ""),
+                path: (.path // ""),
+                status: .status,
+                report: .report }
+          ]')"
+        _N="$(printf '%s' "$_APPROVED" | jq 'length')"
+        if [ "$_N" -eq 0 ]; then
+          echo "INFO: memcache 中无 APPROVED 且报告非空的结论，无需落地。" >&2
+          exit 0
+        fi
+        # 追加进结论文件（文件不存在时先初始化为 []）；jq 全程负责转义，杜绝注入
+        [ -f "$AUDIT_VERDICT_FILE" ] || echo '[]' > "$AUDIT_VERDICT_FILE"
+        _TMP="$(mktemp)"
+        jq -c --argjson add "$_APPROVED" '. + $add' "$AUDIT_VERDICT_FILE" > "$_TMP" \
+          && mv "$_TMP" "$AUDIT_VERDICT_FILE"
+        echo "RECORDED ${_N} approved verdict(s)"
+
+  # ---------------------------------------------------------------------------
+  # 说明：原「第 6 步 知识回流」已被移除。
+  #   原因：该步紧跟创建 Issue 之后运行，此刻人类评审根本还没来得及给出反馈，
+  #   既读不到任何真实“驳回原因”，也没有持久化落点，只会产出一个孤立回复——并不能
+  #   形成所宣称的学习闭环。真实的人工反馈（对 Issue 打“误报/已修复”标签、关闭原因、
+  #   评论等）属于事后事件，应由一套独立的事件驱动工作流（如监听 issues labeled/closed）
+  #   在 Issue 被人工处理后异步摄入并持久化，供下一次运行前载入知识库，而不是在本
+  #   次自动分流内即时回收。如需人工反馈驱动改进，请另建反馈工作流并在此引用其产物。
+  # ---------------------------------------------------------------------------
