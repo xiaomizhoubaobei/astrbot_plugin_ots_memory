@@ -337,8 +337,12 @@ taskflow:
           echo "ERROR: 无法定位 memcache 落盘目录（MEMCACHE_STATE_DIR=${MEMCACHE_STATE_DIR:-<unset>}），拒绝静默跳过。" >&2
           exit 1
         fi
-        # 读取全部键值（兼容两种后端：sqlite 默认 memory.db / dictionary_file 的 memory.json），
+        # 读取全部键值（兼容两种后端：sqlite 默认落 memory.db / dictionary_file 落 memory.json），
         # 统一导出为扁平 JSON 对象 {key: value}，供后续 jq 过滤。
+        # ⚠️ 表名是上游框架的**实际 schema**：sqlite 后端用 SQLAlchemy 模型
+        #    KeyValue（__tablename__ = "key_value_store"）建表，故必须查 key_value_store；
+        #    写成 key_value 会抛 `no such table` → 本步 set -e 下直接失败、不产出结论。
+        #    同理 sqlite 后端的库文件名是 memory.db（见 upstream sqlite.py），不是 memcache.db。
         _KV="$(python3 - "$_MC_DIR" <<'PY'
         import json, os, sqlite3, sys
         d = sys.argv[1]
@@ -346,7 +350,7 @@ taskflow:
         if os.path.isfile(db):
             con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)  # 只读打开，避免与 MCP 进程争写锁
             out = {}
-            for key, value in con.execute("SELECT key, value FROM key_value"):
+            for key, value in con.execute("SELECT key, value FROM key_value_store"):
                 try:
                     out[key] = json.loads(value)
                 except Exception:

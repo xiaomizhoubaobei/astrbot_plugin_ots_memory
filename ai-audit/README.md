@@ -192,6 +192,13 @@ cp -r <本项目>/ai-audit ai_audit
    > 再对第 ④ 步写入的**自包含** `_verdict`（含 `alert_number/rule/path/status/report`）
    > 做确定性过滤——全程不调用 MCP、不依赖模板渲染。
    >
+   > 📌 **落盘文件名与表名以「上游框架实际 schema」为准（勿凭印象猜）**：
+   > 默认后端 `sqlite` 落 `memory.db`（**不是** `memcache.db`，见 upstream
+   > `memcache_backend/sqlite.py`）；其建表模型 `KeyValue` 的 `__tablename__` 是
+   > **`key_value_store`**（见 upstream `sql_models.py`），故查询必须写
+   > `SELECT key, value FROM key_value_store`——写成 `key_value` 会抛
+   > `no such table`，在本步 `set -e` 下直接失败、不产出任何结论。
+   >
    > 🔒 **本 taskflow 全程不创建 Issue、不需要 `GH_PAT`**：它只产出结论文件。
    > 真正的 Issue 创建交给 `ai-audit-scheduled.yml` 里持令牌的独立 `publish` job，
    > 由它消费该结论文件后完成——这样「不可信输入（告警/仓库内容）」与「高权限动作（建 Issue）」
