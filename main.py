@@ -1,7 +1,9 @@
+"""Main entry for Tablestore Agent Memory plugin."""
+
+from __future__ import annotations
+
 import asyncio
-import logging
-from pydantic import Field
-from pydantic.dataclasses import dataclass
+from typing import Any, Optional
 
 from astrbot.api import AstrBotConfig, FunctionTool, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -9,12 +11,16 @@ from astrbot.api.star import Context, Star
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
+from pydantic import Field
+from pydantic.dataclasses import dataclass
 
 from .client import OTSMemoryClient
 
 
 @dataclass
 class RecallMemoryTool(FunctionTool[AstrAgentContext]):
+    """长期记忆检索工具."""
+
     name: str = "recall_memory"
     description: str = (
         "从长期记忆库中检索与当前话题相关的历史记忆。"
@@ -33,16 +39,20 @@ class RecallMemoryTool(FunctionTool[AstrAgentContext]):
         }
     )
 
-    plugin: object = Field(default=None, exclude=True)
+    plugin: Optional["OTSMemoryPlugin"] = Field(default=None, exclude=True)
 
     async def call(
         self,
         context: ContextWrapper[AstrAgentContext],
-        **kwargs,
+        **kwargs: Any,
     ) -> ToolExecResult:
+        """执行记忆检索."""
         query = kwargs.get("query", "").strip()
         if not query:
             return ToolExecResult(is_error=True, result="query 参数不能为空")
+
+        if not self.plugin or not self.plugin.client:
+            return ToolExecResult(is_error=True, result="OTS 记忆插件客户端未初始化")
 
         try:
             results = await self.plugin.client.search_memories(
@@ -71,6 +81,8 @@ class RecallMemoryTool(FunctionTool[AstrAgentContext]):
 
 @dataclass
 class SaveMemoryTool(FunctionTool[AstrAgentContext]):
+    """长期记忆保存工具."""
+
     name: str = "save_memory"
     description: str = (
         "将重要事实、用户偏好或约定主动保存到长期记忆库。"
@@ -89,16 +101,20 @@ class SaveMemoryTool(FunctionTool[AstrAgentContext]):
         }
     )
 
-    plugin: object = Field(default=None, exclude=True)
+    plugin: Optional["OTSMemoryPlugin"] = Field(default=None, exclude=True)
 
     async def call(
         self,
         context: ContextWrapper[AstrAgentContext],
-        **kwargs,
+        **kwargs: Any,
     ) -> ToolExecResult:
+        """执行记忆保存."""
         fact = kwargs.get("fact", "").strip()
         if not fact:
             return ToolExecResult(is_error=True, result="fact 参数不能为空")
+
+        if not self.plugin or not self.plugin.client:
+            return ToolExecResult(is_error=True, result="OTS 记忆插件客户端未初始化")
 
         try:
             await self.plugin.client.add_memories(
@@ -114,12 +130,15 @@ class SaveMemoryTool(FunctionTool[AstrAgentContext]):
 
 
 class OTSMemoryPlugin(Star):
+    """Tablestore Agent Memory Plugin Star 类."""
+
     def __init__(self, context: Context, config: AstrBotConfig):
+        """初始化插件配置并注册 Tool."""
         super().__init__(context)
         self.config = config
 
-        self.store_name: str = config.get("memory_store_name", "huawu_memory")
-        self.app_id: str = config.get("app_id", "astrbot")
+        self.store_name: str = str(config.get("memory_store_name", "huawu_memory"))
+        self.app_id: str = str(config.get("app_id", "astrbot"))
         self.tenant_id: str = "default"
         self.top_k: int = int(config.get("top_k", 5))
         self.min_score: float = float(config.get("min_score", 0.4))
@@ -131,6 +150,7 @@ class OTSMemoryPlugin(Star):
         ak_id = config.get("access_key_id", "")
         ak_secret = config.get("access_key_secret", "")
 
+        self.client: Optional[OTSMemoryClient]
         if not all([endpoint, instance_name, ak_id, ak_secret]):
             logger.warning(
                 "[ots_memory] 配置不完整，插件功能已禁用。"
@@ -154,7 +174,7 @@ class OTSMemoryPlugin(Star):
 
     @filter.on_decorating_result()
     async def on_after_reply(self, event: AstrMessageEvent):
-        """对话结束后，异步将本轮消息投递到记忆库沉淀（auto_record 开启时）"""
+        """对话结束后，异步将本轮消息投递到记忆库沉淀（auto_record 开启时）."""
         if not self.auto_record or self.client is None:
             return
 
@@ -174,20 +194,22 @@ class OTSMemoryPlugin(Star):
                     result_text = content
                     break
 
-        if result_text:
-            messages.append({"role": "assistant", "content": result_text})
-
-        if not messages:
+        if not messages or not result_text:
             return
 
-        try:
-            asyncio.ensure_future(
-                self.client.add_memories(
+        messages.append({"role": "assistant", "content": result_text})
+
+        async def _background_save():
+            try:
+                assert self.client is not None
+                await self.client.add_memories(
                     store_name=self.store_name,
                     app_id=self.app_id,
                     tenant_id=self.tenant_id,
                     messages=messages,
                 )
-            )
-        except Exception as e:
-            logger.debug(f"[ots_memory] 异步记忆沉淀失败: {e}")
+                logger.debug(f"[ots_memory] 自动沉淀记忆成功，共 {len(messages)} 条")
+            except Exception as e:
+                logger.warning(f"[ots_memory] 自动沉淀记忆失败: {e}")
+
+        asyncio.create_task(_background_save())

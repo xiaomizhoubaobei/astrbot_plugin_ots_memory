@@ -1,3 +1,5 @@
+"""Client for Tablestore Agent Memory REST API."""
+
 import base64
 import datetime
 import hashlib
@@ -5,15 +7,18 @@ import hmac
 import json
 import logging
 from typing import Any, Dict, List, Optional
+
 import aiohttp
 
 logger = logging.getLogger("astrbot")
 
+
 class OTSMemoryClient:
+    """轻量级异步 Tablestore Agent Memory REST 客户端.
+
+    原生实现阿里云 OTS 签名认证，直连 OpenAPI.
     """
-    轻量级异步 Tablestore Agent Memory REST 客户端
-    原生实现阿里云 OTS 签名认证，直连 OpenAPI
-    """
+
     def __init__(
         self,
         endpoint: str,
@@ -22,6 +27,15 @@ class OTSMemoryClient:
         access_key_secret: str,
         region: str = "cn-shanghai",
     ):
+        """初始化 OTSMemoryClient.
+
+        Args:
+            endpoint: OTS 实例接入点 URL.
+            instance_name: OTS 实例名.
+            access_key_id: 阿里云 AccessKey ID.
+            access_key_secret: 阿里云 AccessKey Secret.
+            region: 地域，默认 cn-shanghai.
+        """
         self.endpoint = endpoint.rstrip("/")
         self.instance_name = instance_name
         self.ak_id = access_key_id
@@ -40,7 +54,7 @@ class OTSMemoryClient:
         now = datetime.datetime.now(datetime.timezone.utc)
         date_str = now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
         date_only = now.strftime("%Y%m%d")
-        
+
         md5_digest = base64.b64encode(hashlib.md5(body_bytes).digest()).decode("utf-8")
         canonical_uri = f"/{api_name}"
 
@@ -96,6 +110,19 @@ class OTSMemoryClient:
         top_k: int = 5,
         min_score: float = 0.0,
     ) -> List[Dict[str, Any]]:
+        """检索长期记忆.
+
+        Args:
+            store_name: 记忆库名称.
+            app_id: 应用标识.
+            tenant_id: 租户标识.
+            query: 语义检索查询语句.
+            top_k: 返回最多结果数.
+            min_score: 最小相似度阈值.
+
+        Returns:
+            记忆项列表.
+        """
         payload = {
             "memoryStoreName": store_name,
             "scope": {
@@ -110,7 +137,6 @@ class OTSMemoryClient:
             payload["thresholds"] = {"minScore": min_score}
 
         res = await self._request("SearchMemories", payload)
-        # OTS 返回 results 列表
         return res.get("results", [])
 
     async def add_memories(
@@ -121,17 +147,30 @@ class OTSMemoryClient:
         messages: Optional[List[Dict[str, str]]] = None,
         text: Optional[str] = None,
     ) -> dict:
+        """沉淀或添加长期记忆.
+
+        Args:
+            store_name: 记忆库名称.
+            app_id: 应用标识.
+            tenant_id: 租户标识.
+            messages: 对话轮次列表.
+            text: 单条事实文本.
+
+        Returns:
+            响应字典.
+        """
         payload: Dict[str, Any] = {
             "memoryStoreName": store_name,
             "scope": {
                 "appId": app_id,
                 "tenantId": tenant_id,
-                "agentId": "__default__",
-                "runId": "__default__",
             },
         }
         if messages:
             payload["messages"] = messages
-        if text:
-            payload["text"] = text
+        elif text:
+            payload["userMemories"] = [{"text": text}]
+        else:
+            raise ValueError("messages 和 text 不能同时为空")
+
         return await self._request("AddMemories", payload)
