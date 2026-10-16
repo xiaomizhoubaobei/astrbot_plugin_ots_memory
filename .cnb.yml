@@ -69,5 +69,7 @@ main:
                 username: ${GIT_USERNAME}
                 password: ${GIT_ACCESS_TOKEN}
                 branch: main
+                # 强制覆盖镜像：镜像仓库以 CNB 侧为准，分叉时用 --force 覆盖（见 git-sync 的 PLUGIN_FORCE）
+                force: true
                 git_user: ${GIT_USERNAME}
                 git_email: ${GIT_EMAIL}
