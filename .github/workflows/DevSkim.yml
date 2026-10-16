@@ -3,44 +3,30 @@
 
 name: 'DevSkim 多环境分析'
 
+# 不设 paths 过滤：DevSkim 属源码级扫描，YAML/配置同样可能含不安全模式，
+# 故对所有变更全量扫描（由 workflow_dispatch 支持补跑）。
 on:
   push:
     branches: [ "main" ]
-    paths:
-      - '**/*.py'
   pull_request:
     branches: [ "main" ]
-    paths:
-      - '**/*.py'
   # 支持手动触发，便于排障与补跑
   workflow_dispatch:
 
+# 最小权限：仅需读取仓库内容、写入安全标签（上传 SARIF）与读取 Actions 元数据。
+# 本工作流无 OIDC 消费者，不授予 id-token: write。
 permissions:
   contents: read
   security-events: write
-  id-token: write
   actions: read
 
 jobs:
   scan:
-    strategy:
-      matrix:
-        os: [ubuntu-latest]
-        python-version: ['3.12', '3.13', '3.14']
-    runs-on: ${{ matrix.os }}
-    name: DevSkim 扫描在 ${{ matrix.os }} 上使用 Python ${{ matrix.python-version }}
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
-      id-token: write
-
+    runs-on: ubuntu-latest
+    name: DevSkim 源码扫描
     steps:
       - name: 加固运行器（审计所有出站调用）
         # 观察模式：egress-policy 保持 audit，仅记录出网调用、不阻断构建。
-        # 本工作流会 pip install requirements.txt，出站域名随依赖变化而波动，
-        # 阻断模式下的白名单极易因依赖新增而漏项，故回退为观察模式，
-        # 与仓库内其余工作流口径统一（egress-policy: audit）。
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
         with:
           egress-policy: audit
@@ -50,13 +36,10 @@ jobs:
       - name: 设置 Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: '3.12'
 
-      - name: 安装依赖项
-        run: |
-          python -m pip install --upgrade pip -q
-          pip install -r requirements.txt -q
-
+      # DevSkim 是源码级静态扫描，Python 版本不改变扫描输入，
+      # 故不做多版本矩阵，避免同一结果与 SARIF 重复上传三次。
       - name: 运行 DevSkim 扫描器
         uses: microsoft/DevSkim-Action@4b5047945a44163b94642a1cecc0d93a3f428cc6 # v1.0.16
 

@@ -3,16 +3,15 @@
 # 扫描将提供关于发现的术语和可以使用的替代术语的上下文。
 name: 包容性分析扫描
 
+# 不设 paths 过滤：排他性术语同样可能出现在 README、文档与工作流中，
+# 只扫 Python 文件会漏检，故对所有变更全量扫描。
 on:
   push:
     branches: [main]
-    paths:
-      - "**/*.py"
   workflow_dispatch:
 
-# 声明最小权限（保留只读，并补齐三项统一权限）。
+# 声明最小权限（仅只读）。本工作流无 OIDC 消费者，不授予 id-token: write。
 permissions:
-  id-token: write
   actions: read
   contents: read
 

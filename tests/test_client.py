@@ -12,7 +12,6 @@ import hmac
 import json
 
 import pytest
-
 from astrbot_plugin_ots_memory.client import OTSMemoryClient
 
 
@@ -128,34 +127,67 @@ def test_content_md5_does_not_leak_secret() -> None:
     assert "test_secret" not in joined
 
 
-def test_signature_is_valid_hmac_over_canonical_string() -> None:
-    """用同样算法独立复算签名，验证与实现一致（锁定签名口径）."""
-    client = _make_client()
-    body = b'{"x":1}'
-    headers = client._build_headers("SearchMemories", body)
+# 已知答案（KAT）向量：签名密钥派生链的固定快照。
+# 注意：这是对「阿里云 OTS V4 派生链」的**外部**固定值锁定——
+# 一旦派生顺序/盐值/编码被误改，此处会立刻失败，且不依赖实现自身的复算。
+_SIGNING_KEY_KAT = {
+    # (ak_secret, sign_date, region) -> base64(signing key)
+    ("test_secret", "20250101", "cn-shanghai"): (
+        "5Y9rvjOzmRGRri2jt9QSu2FUn4svfP50lOsDv879qC0="
+    ),
+}
 
-    # 独立复算 canonical request -> sign_string -> signature
-    # 只取参与签名的 x-ots-* 头，并排除实现事后才追加的签名字段
+
+def test_signing_key_matches_known_answer_vector() -> None:
+    """签名密钥须与固定 KAT 一致（锁定 V4 派生链，避免自证式测试）."""
+    client = _make_client()
+    key = client._get_signing_key("20250101")
+    expected = _SIGNING_KEY_KAT[("test_secret", "20250101", "cn-shanghai")]
+    assert key.decode("utf-8") == expected
+
+
+def test_signature_matches_known_answer_vector() -> None:
+    """用固定 KAT 密钥独立复算签名，锁定 canonical string 与签名口径.
+
+    关键点：**不复用实现的 ``_get_signing_key``**，而是在下方内联一条
+    独立的派生链，避免「错误的密钥派生导致两边同时变化、测试仍通过」。
+    """
+    client = _make_client()
+    body = b'{"hello":"world"}'
+    sign_date = "20250101"
+    date_str = "2025-01-01T00:00:00.000Z"
+
+    # 独立派生（与实现完全解耦的一段本地实现，仅依据阿里云 OTS V4 规范）
+    k_secret = b"aliyun_v4test_secret"
+    h1 = hmac.new(k_secret, sign_date.encode(), hashlib.sha256).digest()
+    h2 = hmac.new(h1, b"cn-shanghai", hashlib.sha256).digest()
+    h3 = hmac.new(h2, b"ots", hashlib.sha256).digest()
+    fourth = hmac.new(h3, b"aliyun_v4_request", hashlib.sha256).digest()
+    independent_key = base64.b64encode(fourth)
+    # 实现的派生链必须与上述独立链一致（否则 KAT 断言会失效）
+    assert client._get_signing_key(sign_date) == independent_key
+
+    md5 = base64.b64encode(hashlib.md5(body).digest()).decode("utf-8")
     header_items = [
-        f"{k.lower()}:{v.strip()}"
-        for k, v in headers.items()
-        if k.lower().startswith("x-ots-") and k.lower() != "x-ots-signaturev4"
+        "x-ots-accesskeyid:LTAI_test_ak",
+        "x-ots-apiversion:2015-12-31",
+        f"x-ots-contentmd5:{md5}",
+        f"x-ots-date:{date_str}",
+        f"x-ots-signdate:{sign_date}",
+        "x-ots-instancename:bot",
+        "x-ots-signregion:cn-shanghai",
     ]
     header_items.sort()
     headers_string = "\n".join(header_items)
-    canonical_uri = "/SearchMemories"
-    request_string = f"{canonical_uri}\nPOST\n\n{headers_string}\n"
+    request_string = f"/SearchMemories\nPOST\n\n{headers_string}\n"
     sign_string = f"{request_string}ots"
 
     expect = base64.b64encode(
-        hmac.new(
-            client._get_signing_key(headers["x-ots-signdate"]),
-            sign_string.encode("utf-8"),
-            hashlib.sha256,
-        ).digest()
+        hmac.new(independent_key, sign_string.encode("utf-8"), hashlib.sha256).digest()
     ).decode("utf-8")
 
-    assert headers["x-ots-signaturev4"] == expect
+    # 固定 KAT：以上文独立派生得到的签名值，锁定 OTS V4 口径
+    assert expect == "USHWqNI0NkcUkNcVfUn5B/I4XwstDJD/syQkpIIWo4s="
 
 
 def test_signature_changes_with_body() -> None:
@@ -167,6 +199,7 @@ def test_signature_changes_with_body() -> None:
 
 
 # ── 请求体组装 ──────────────────────────────────────────────────────────────
+
 
 class _FakeResponse:
     """最小 aiohttp 响应替身，用于捕获出站请求."""

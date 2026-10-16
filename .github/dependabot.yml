@@ -9,12 +9,14 @@ updates:
     schedule:
       interval: "weekly"  # 更新频率：每日、每周或每月
       day: "tuesday"  # 指定星期几进行更新
-      time: "09:00"  # 指定更新时间（UTC）
+      time: "09:00"  # 指定更新时间（Asia/Shanghai）
       timezone: "Asia/Shanghai"  # 指定时区
     open-pull-requests-limit: 1  # 同时打开的最大 PR 数量
     target-branch: "main"  # 目标分支
+    # 注意：Dependabot 只会附加「仓库中已存在」的标签；
+    # 未预先创建 dependencies/python 时这些标签会被静默忽略。
     labels:
-      - "dependencies"  # 自动添加的标签
+      - "dependencies"
       - "python"
     # 定义版本更新策略
     versioning-strategy: "auto"
@@ -33,6 +35,7 @@ updates:
       timezone: "Asia/Shanghai"
     open-pull-requests-limit: 1
     target-branch: "main"
+    # 同上：dependencies/github-actions 标签需先存在于仓库中。
     labels:
       - "dependencies"
       - "github-actions"
