@@ -6,11 +6,13 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.coverage.run]
-# 覆盖率只统计插件自身模块；用包名（而非路径）计数，SF 才会写出
-# `astrbot_plugin_ots_memory/client.py` 这类相对包目录的路径，
-# 从而被 Codecov 的路径映射正确匹配。
-# 注意：命令行 --source 显式传入时以命令行为准（CI 即如此），此处是裸跑时的兜底口径。
-source = ["astrbot_plugin_ots_memory"]
+# 裸跑口径：用**文件系统路径**而非包名计数。
+# 包名口径依赖「包在 coverage 启动前已经可导入」，而裸跑 `coverage run -m pytest`
+# 时包视图由 conftest/pytest 才建立，coverage 在启动阶段解析 source 会解析不到包，
+# 于是静默写出空报告。路径口径没有这个先后依赖（CI 走 tests.run_coverage，
+# 那里显式传 --source=<包名> 以命令行优先）。
+# 注意：SF 由此写成相对检出根的 `client.py` / `main.py`，与下方 Codecov 路径一致。
+source = ["."]
 
 [tool.coverage.report]
 # tests 与 ai-audit（纯模板/示例资产，不被单测覆盖）不计入分母
