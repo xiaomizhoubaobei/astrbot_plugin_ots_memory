@@ -20,11 +20,11 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from coverage import Coverage
+
 # 关键顺序：先建包视图（此处**不**导入插件包本身，否则 coverage 会报
 # "module was previously imported, but not measured"），再构造 Coverage。
 from tests import package_view  # noqa: F401  # 导入即注册包视图
-
-from coverage import Coverage
 
 PACKAGE_NAME = "astrbot_plugin_ots_memory"
 _REPO_ROOT = Path(__file__).resolve().parents[1]
