@@ -22,6 +22,10 @@ coverage:
         informational: true
 
 # 覆盖率构成（供 Codecov 页面展开查看）
+# 路径口径：coverage 用「包名」--source 计数，SF 写成相对检出根的
+# `client.py` / `main.py`，故此处无需再加包名前缀；tests/ 与 ai-audit/
+# 已在 pyproject.toml 的 coverage.report.omit 中排除，相同规则再写一遍，
+# 以防有人绕过工程配置裸跑 coverage。
 flags:
   unittests:
     paths:

@@ -1,0 +1,17 @@
+# 仅承载工具配置（非打包元数据）：本仓库是 AstrBot 插件，通过目录名作为包名被宿主加载，
+# 不发布到 PyPI，故此处不声明 [project]/[build-system]，避免误引入打包语义。
+[tool.pytest.ini_options]
+# 异步测试直接写 `async def`，无需逐个打 @pytest.mark.asyncio
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+# 覆盖率只统计插件自身模块；用包名（而非路径）计数，SF 才会写出
+# `astrbot_plugin_ots_memory/client.py` 这类相对包目录的路径，
+# 从而被 Codecov 的路径映射正确匹配。
+# 注意：命令行 --source 显式传入时以命令行为准（CI 即如此），此处是裸跑时的兜底口径。
+source = ["astrbot_plugin_ots_memory"]
+
+[tool.coverage.report]
+# tests 与 ai-audit（纯模板/示例资产，不被单测覆盖）不计入分母
+omit = ["tests/*", "ai-audit/*"]

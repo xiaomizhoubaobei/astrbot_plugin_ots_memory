@@ -1,69 +1,41 @@
 """pytest 共享夹具：让插件包以「顶层包名」可导入.
 
-本仓库目录名即包名（``astrbot_plugin_ots_memory``），但在仓库根直接跑
-``pytest`` 时父目录里没有同名包，``from astrbot_plugin_ots_memory.client import``
-会失败。此处在测试收集前构造一个临时包视图：在同名临时目录下放一个指回
-仓库根的符号链接（不支持符号链接时退化为复制），再加入 ``sys.path``。
+本仓库目录名即包名（``astrbot_plugin_ots_memory``），模块内一律写作
+``from astrbot_plugin_ots_memory.xxx import``；但仓库目录常常并不叫这个名字
+（CI 检出目录名随机），于是在仓库根直接跑 ``pytest`` 会因「没有同名包」而
+整片收集失败。
+
+这里不做 ``sys.path`` 造包，而是注册一个 meta path finder（见
+``tests/meta_path.py``），把仓库根以固定包名暴露出去。好处有二：
+
+1. 不依赖检出目录名，也不需要往父目录写符号链接（旧方案在只读检出目录或
+   并发进程下会互相踩，且要为 Windows 退化到 copytree）；
+2. 覆盖率口径与之一致——``coverage run --source=<包名>`` 依赖的正是
+   「这个包能从哪导入」，包视图走 import 系统后，直接裸跑
+   ``coverage run --source=astrbot_plugin_ots_memory -m pytest`` 即可命中，
+   不必再把「仓库的父目录」塞进 ``PYTHONPATH``。
 """
 
 from __future__ import annotations
 
-import os
-import shutil
-import sys
-import tempfile
+import importlib.util
 from pathlib import Path
 
-# 插件包名：与 AstrBot 宿主的加载口径一致
-_PACKAGE_NAME = "astrbot_plugin_ots_memory"
 # 仓库根目录（本文件位于 tests/ 下）
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_installed = False
 
 
-def _ensure_package_view() -> None:
-    """确保插件包可按顶层包名导入（幂等）."""
-    global _installed
-    if _installed:
-        return
-
-    # 显式允许在测试中固定临时目录（CI/并发场景），默认每次运行取唯一目录，
-    # 避免多个进程/检出共用同一路径而互相覆盖包视图符号链接。
-    override = os.environ.get("OTS_TEST_VIEW_ROOT")
-    view_root = (
-        Path(override)
-        if override
-        else Path(tempfile.mkdtemp(prefix="ots-memory-test-view-"))
+def _load_meta_path():
+    """按路径加载同目录的 meta_path.py（不依赖 pytest 的 sys.path 插入策略）."""
+    spec = importlib.util.spec_from_file_location(
+        "_ots_memory_meta_path", Path(__file__).with_name("meta_path.py")
     )
-
-    # 仓库目录本身已是该包名时（如 GitHub 检出目录名即包名），
-    # 直接让「仓库根的父目录」进 sys.path，使 `import <包名>` 命中该目录，
-    # 无需再垫一层符号链接。
-    if _REPO_ROOT.name == _PACKAGE_NAME:
-        parent = str(_REPO_ROOT.parent)
-        if parent not in sys.path:
-            sys.path.insert(0, parent)
-        _installed = True
-        return
-
-    view_root.mkdir(parents=True, exist_ok=True)
-    link = view_root / _PACKAGE_NAME
-    if link.is_symlink() or link.exists():
-        if link.is_symlink() or link.is_dir():
-            try:
-                link.unlink()
-            except OSError:
-                shutil.rmtree(link, ignore_errors=True)
-
-    try:
-        os.symlink(_REPO_ROOT, link, target_is_directory=True)
-    except (OSError, NotImplementedError):
-        # 退化路径：不支持符号链接的环境（如部分 Windows 配置）用复制
-        shutil.copytree(_REPO_ROOT, link, dirs_exist_ok=True)
-
-    if str(view_root) not in sys.path:
-        sys.path.insert(0, str(view_root))
-    _installed = True
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-_ensure_package_view()
+# 收集前完成注册：conftest 先于测试模块导入，故测试里的
+# `from astrbot_plugin_ots_memory.client import ...` 一定能命中。
+PACKAGE_VIEW_MODE = _load_meta_path().install(str(_REPO_ROOT))

@@ -62,15 +62,16 @@ jobs:
         env:
           # 覆盖率数据文件落到临时目录，避免污染工作区
           COVERAGE_FILE: ${{ runner.temp }}/.coverage
-          # 检出目录名即包名，其父目录（$GITHUB_WORKSPACE 的上一级）
-          # 加入 PYTHONPATH 后 `import astrbot_plugin_ots_memory` 才能命中；
-          # conftest.py 亦有等价兜底，此处显式声明以免依赖收集顺序。
-          PYTHONPATH: ${{ github.workspace }}/..
         run: |
-          # --source 用「包名」计数，coverage 会以包所在目录为基准写出相对路径
-          # （如 astrbot_plugin_ots_memory/client.py），从而正确定位到 GitHub
-          # 工作区文件；若误用绝对路径 --source，SF 会退化成
-          # /home/runner/work/... 这类路径，Codecov 固定路径映射后匹配不到文件。
+          # 不再依赖 PYTHONPATH 指路：插件包视图由 tests/conftest.py 通过
+          # import hook 建立（tests/meta_path.py），与检出目录名无关。
+          # 先做一次导入自检——包名解析不到时，coverage 只会警告
+          # "Module ... was never imported" 并静默写出空报告，比直接失败更难查。
+          python -c "import astrbot_plugin_ots_memory as m; print('包视图:', m.__file__)"
+
+          # --source 用「包名」计数，SF 才会写出相对包目录的路径
+          # （如 client.py，<source> 记作检出根）；若改用路径 --source，
+          # SF 会退化成 /home/runner/work/... 这类绝对路径，Codecov 匹配不到文件。
           python -m coverage run --source=astrbot_plugin_ots_memory -m pytest tests -q
           python -m coverage report -m
           python -m coverage xml -o coverage.xml
