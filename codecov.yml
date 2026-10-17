@@ -22,10 +22,11 @@ coverage:
         informational: true
 
 # 覆盖率构成（供 Codecov 页面展开查看）
-# 路径口径：coverage 用「包名」--source 计数，SF 写成相对检出根的
-# `client.py` / `main.py`，故此处无需再加包名前缀；tests/ 与 ai-audit/
-# 已在 pyproject.toml 的 coverage.report.omit 中排除，相同规则再写一遍，
-# 以防有人绕过工程配置裸跑 coverage。
+# 路径口径：CI 用 `python -m tests.run_coverage`，其 --source 传包名，SF 仍写成
+# 相对检出根的 `client.py` / `main.py`，故此处无需再加包名前缀。
+# 排除口径分两层，互不替代：pyproject.toml 的 coverage.report.omit 决定**算不算**
+# （tests/ 与 ai-audit/），本文件的 ignore 只决定**上传后显示哪些**（仅 tests/ 与
+# 安装脚本，ai-audit/ 不在此处重复配置）；Codecov 的 ignore 管不到本地裸跑。
 flags:
   unittests:
     paths:
