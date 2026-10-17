@@ -63,18 +63,20 @@ jobs:
           # 覆盖率数据文件落到临时目录，避免污染工作区
           COVERAGE_FILE: ${{ runner.temp }}/.coverage
         run: |
-          # 不再依赖 PYTHONPATH 指路：插件包视图由 tests/conftest.py 通过
-          # import hook 建立（tests/meta_path.py），与检出目录名无关。
-          # 先做一次导入自检——包名解析不到时，coverage 只会警告
-          # "Module ... was never imported" 并静默写出空报告，比直接失败更难查。
-          python -c "import astrbot_plugin_ots_memory as m; print('包视图:', m.__file__)"
+          # 包视图（把检出根暴露为顶层包名）由 tests/meta_path.py 的 import hook
+          # 提供，与检出目录名无关，不需要往 PYTHONPATH 里塞父目录。
+          # 但 coverage 解析 --source 早于 pytest 加载 conftest，故用启动器把
+          # 「建包视图 → 启 coverage → 跑 pytest」放进同一个进程，顺序可控。
+          python -m tests.run_coverage
 
-          # --source 用「包名」计数，SF 才会写出相对包目录的路径
-          # （如 client.py，<source> 记作检出根）；若改用路径 --source，
-          # SF 会退化成 /home/runner/work/... 这类绝对路径，Codecov 匹配不到文件。
-          python -m coverage run --source=astrbot_plugin_ots_memory -m pytest tests -q
-          python -m coverage report -m
-          python -m coverage xml -o coverage.xml
+          # 兜底自检：没收集到任何覆盖率数据就明确失败，而不是上传一份空报告。
+          python -c "
+          import xml.etree.ElementTree as ET
+          root = ET.parse('coverage.xml').getroot()
+          files = [c.get('filename') for c in root.iter('class')]
+          assert files, 'coverage.xml 里没有任何文件，包名很可能没被解析到'
+          print('覆盖率文件:', files)
+          "
 
       # 上报 Codecov：仅在拿到 token（仓库 Secret 或同名 CNB 密钥）时执行。
       # 未配置 token 时跳过上报，仅留存 coverage.xml 工件，不使 CI 失败。

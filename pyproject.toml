@@ -15,3 +15,10 @@ source = ["astrbot_plugin_ots_memory"]
 [tool.coverage.report]
 # tests 与 ai-audit（纯模板/示例资产，不被单测覆盖）不计入分母
 omit = ["tests/*", "ai-audit/*"]
+
+[tool.mypy]
+# 仓库根即包根（`__init__.py` 在根）。不声明 base 时 mypy 会把 tests/ 同时算作
+# 「workspace.tests.*」与「tests.*」两套模块名，报 source file found twice。
+explicit_package_bases = true
+mypy_path = ".."
+ignore_missing_imports = true
