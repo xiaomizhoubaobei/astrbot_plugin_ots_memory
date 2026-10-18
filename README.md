@@ -11,13 +11,43 @@
 
 ## 安装
 
-将本仓库克隆到 AstrBot 插件目录：
+本插件以 **AstrBot** 为宿主运行，需先有可用的 AstrBot 实例。
+
+### 1. 安装 AstrBot
 
 ```bash
-git clone https://cnb.cool/XMZZUZHI/Astrbot/astrbot_plugin_ots_memory.git
+pip install astrbot          # 要求 >= 4.0.0
+astrbot run                  # 默认监听 http://localhost:6185
 ```
 
-然后在 AstrBot 管理面板重载插件。
+或按官方文档部署（Docker / 源码均可）：
+<https://github.com/AstrBotDevs/AstrBot>
+
+### 2. 安装插件
+
+将本仓库克隆到 AstrBot 的 `data/plugins/` 目录：
+
+```bash
+git clone https://cnb.cool/XMZZUZHI/Astrbot/astrbot_plugin_ots_memory.git \
+  data/plugins/astrbot_plugin_ots_memory
+```
+
+然后重启 AstrBot，或在其管理面板中重载插件。
+
+## 开发
+
+开发/测试依赖见 `requirements-dev.txt`，其中已包含 AstrBot 宿主
+（`main.py` 依赖 `astrbot.api` / `astrbot.core.*`，缺它无法导入）：
+
+```bash
+pip install -r requirements-dev.txt
+python -m tests.run_coverage    # 跑单测并生成 coverage.xml
+```
+
+> 注：AstrBot 宿主是以 pydantic dataclass 形式声明 Tool 的，`plugin` 这类运行时
+> 引用字段须标注为 `Optional[Any]`（不能直接标注插件类），且工具返回值须用
+> `CallToolResult` 构造——`ToolExecResult` 只是 `str | CallToolResult` 的联合别名，
+> 不可当函数调用。
 
 ## 配置
 

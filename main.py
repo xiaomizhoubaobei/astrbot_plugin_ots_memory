@@ -11,10 +11,24 @@ from astrbot.api.star import Context, Star
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
+from mcp.types import CallToolResult, TextContent
 from pydantic import Field
 from pydantic.dataclasses import dataclass
 
 from .client import OTSMemoryClient
+
+
+def _tool_result(text: str, *, is_error: bool = False) -> ToolExecResult:
+    """构造工具执行结果.
+
+    ``ToolExecResult`` 是 ``str | CallToolResult`` 的联合别名，**不可直接调用**；
+    需要表达"出错"语义时必须显式包成 ``CallToolResult(isError=True)``，
+    否则运行时会抛 ``TypeError: 'types.UnionType' object is not callable``。
+    """
+    return CallToolResult(
+        content=[TextContent(type="text", text=text)],
+        isError=is_error,
+    )
 
 
 @dataclass
@@ -39,7 +53,11 @@ class RecallMemoryTool(FunctionTool[AstrAgentContext]):
         }
     )
 
-    plugin: Optional["OTSMemoryPlugin"] = Field(default=None, exclude=True)
+    # 运行时注入的宿主插件引用：不参与工具 JSON Schema，也不序列化。
+    # 类型须写成 Any：OTSMemoryPlugin 并非 pydantic 可建模类型，直接标注会
+    # 在实例化工具时抛 PydanticSchemaGenerationError（宿主 FunctionTool 未开启
+    # arbitrary_types_allowed，见 astrbot/core/agent/tool.py）。
+    plugin: Optional[Any] = Field(default=None, exclude=True)
 
     async def call(
         self,
@@ -49,10 +67,10 @@ class RecallMemoryTool(FunctionTool[AstrAgentContext]):
         """执行记忆检索."""
         query = kwargs.get("query", "").strip()
         if not query:
-            return ToolExecResult(is_error=True, result="query 参数不能为空")
+            return _tool_result("query 参数不能为空", is_error=True)
 
         if not self.plugin or not self.plugin.client:
-            return ToolExecResult(is_error=True, result="OTS 记忆插件客户端未初始化")
+            return _tool_result("OTS 记忆插件客户端未初始化", is_error=True)
 
         try:
             results = await self.plugin.client.search_memories(
@@ -64,7 +82,7 @@ class RecallMemoryTool(FunctionTool[AstrAgentContext]):
                 min_score=self.plugin.min_score,
             )
             if not results:
-                return ToolExecResult(result="没有找到相关的历史记忆。")
+                return _tool_result("没有找到相关的历史记忆。")
 
             lines = []
             for item in results:
@@ -73,10 +91,10 @@ class RecallMemoryTool(FunctionTool[AstrAgentContext]):
                 score = item.get("score", 0.0)
                 lines.append(f"[相关度 {score:.2f}] {text}")
 
-            return ToolExecResult(result="\n".join(lines))
+            return _tool_result("\n".join(lines))
         except Exception as e:
             logger.error(f"[ots_memory] recall_memory 失败: {e}")
-            return ToolExecResult(is_error=True, result=f"检索记忆失败: {e}")
+            return _tool_result(f"检索记忆失败: {e}", is_error=True)
 
 
 @dataclass
@@ -101,7 +119,11 @@ class SaveMemoryTool(FunctionTool[AstrAgentContext]):
         }
     )
 
-    plugin: Optional["OTSMemoryPlugin"] = Field(default=None, exclude=True)
+    # 运行时注入的宿主插件引用：不参与工具 JSON Schema，也不序列化。
+    # 类型须写成 Any：OTSMemoryPlugin 并非 pydantic 可建模类型，直接标注会
+    # 在实例化工具时抛 PydanticSchemaGenerationError（宿主 FunctionTool 未开启
+    # arbitrary_types_allowed，见 astrbot/core/agent/tool.py）。
+    plugin: Optional[Any] = Field(default=None, exclude=True)
 
     async def call(
         self,
@@ -111,10 +133,10 @@ class SaveMemoryTool(FunctionTool[AstrAgentContext]):
         """执行记忆保存."""
         fact = kwargs.get("fact", "").strip()
         if not fact:
-            return ToolExecResult(is_error=True, result="fact 参数不能为空")
+            return _tool_result("fact 参数不能为空", is_error=True)
 
         if not self.plugin or not self.plugin.client:
-            return ToolExecResult(is_error=True, result="OTS 记忆插件客户端未初始化")
+            return _tool_result("OTS 记忆插件客户端未初始化", is_error=True)
 
         try:
             await self.plugin.client.add_memories(
@@ -123,10 +145,10 @@ class SaveMemoryTool(FunctionTool[AstrAgentContext]):
                 tenant_id=self.plugin.tenant_id,
                 text=fact,
             )
-            return ToolExecResult(result=f"已保存记忆：{fact}")
+            return _tool_result(f"已保存记忆：{fact}")
         except Exception as e:
             logger.error(f"[ots_memory] save_memory 失败: {e}")
-            return ToolExecResult(is_error=True, result=f"保存记忆失败: {e}")
+            return _tool_result(f"保存记忆失败: {e}", is_error=True)
 
 
 class OTSMemoryPlugin(Star):

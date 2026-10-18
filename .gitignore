@@ -5,3 +5,10 @@ __pycache__/
 *.pem
 !.pem-public
 !ai-audit/handoff-public-key.pem
+
+# 测试/覆盖率产物
+.coverage
+coverage.xml
+
+# AstrBot 宿主运行时数据（CLI 启动会生成，非本仓库内容）
+data/
