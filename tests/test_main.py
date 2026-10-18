@@ -11,7 +11,6 @@ import asyncio
 from typing import Any, Dict, List, Optional
 
 import pytest
-
 from astrbot_plugin_ots_memory.main import (
     OTSMemoryPlugin,
     RecallMemoryTool,
@@ -270,7 +269,9 @@ async def test_save_converts_exception_to_error_result() -> None:
 
 async def _drain_background() -> None:
     """把 on_after_reply 里 create_task 抛出的后台任务跑完."""
-    await asyncio.gather(*[t for t in asyncio.all_tasks() if t is not asyncio.current_task()])
+    await asyncio.gather(
+        *[t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    )
 
 
 async def test_auto_record_skipped_when_disabled() -> None:
@@ -292,7 +293,9 @@ async def test_auto_record_submits_turn_messages() -> None:
     """正常一轮对话应把 user + assistant 两条消息投递沉淀."""
     client = _FakeClient()
     plugin = _make_plugin(client=client)
-    event = _Event([_Seg("我住在杭州"), _Seg(None)], _Result([_Seg(None), _Seg("记住啦")]))
+    event = _Event(
+        [_Seg("我住在杭州"), _Seg(None)], _Result([_Seg(None), _Seg("记住啦")])
+    )
     await plugin.on_after_reply(event)
     await _drain_background()
 
@@ -314,7 +317,9 @@ async def test_auto_record_submits_turn_messages() -> None:
         ([_Seg("提问")], _Result([_Seg(None)])),  # 结果链无文本
     ],
 )
-async def test_auto_record_skips_incomplete_turn(messages: List[Any], result: Any) -> None:
+async def test_auto_record_skips_incomplete_turn(
+    messages: List[Any], result: Any
+) -> None:
     """缺用户消息或助手文本时不动记忆库."""
     client = _FakeClient()
     plugin = _make_plugin(client=client)
