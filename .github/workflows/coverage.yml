@@ -51,13 +51,20 @@ jobs:
           python-version: "3.12"
           cache: pip
 
+      - name: 拉取 AstrBot 官方源码
+        run: |
+          # 宿主一律取自上游官方源码，不从 PyPI 装 astrbot（避免与上游代码漂移）。
+          # 浅克隆即可：只需能安装与导入，不追溯历史。
+          git clone --depth 1 https://github.com/AstrBotDevs/AstrBot.git "$RUNNER_TEMP/astrbot"
+
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          # 统一从 requirements-dev.txt 安装（含运行依赖 + 测试工具 + AstrBot 宿主），
-          # 使 pytest/pytest-asyncio/coverage 纳入 Dependabot 跟踪范围。
-          # 宿主 AstrBot 是 main.py 的导入前置：装不上则 tests/test_main.py 整片
-          # 收集失败、main.py 覆盖率归零，故此处缺依赖应当直接失败而非静默跳过。
+          # 先装宿主源码（editable），它是 main.py 的导入前置：装不上则
+          # tests/test_main.py 整片收集失败、main.py 覆盖率归零，故应当直接失败。
+          pip install -e "$RUNNER_TEMP/astrbot"
+          # 再装本仓库运行依赖 + 测试工具（pytest/pytest-asyncio/coverage 由
+          # Dependabot 跟踪）。requirements-dev.txt 已不再声明 astrbot。
           pip install -r requirements-dev.txt
 
       - name: 运行测试并统计覆盖率

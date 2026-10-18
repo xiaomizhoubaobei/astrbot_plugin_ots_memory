@@ -4,8 +4,13 @@
 
 # AstrBot 宿主：main.py 依赖 astrbot.api / astrbot.core.* 才能被导入，
 # 缺它时 tests/test_main.py 整片收集失败、main.py 覆盖率永远是 0。
-# 用 >= 下限而非锁死，跟随宿主 API 演进取最新兼容版（metadata.yaml 声明 >=4.0.0）。
-astrbot>=4.29.1
+#
+# 宿主**不从 PyPI 装**，一律取自上游官方源码（github.com/AstrBotDevs/AstrBot）：
+#   git clone https://github.com/AstrBotDevs/AstrBot.git
+#   pip install -e AstrBot
+# CI（.github/workflows/coverage.yml）与 CNB（.cnb.yml）均按此口径拉源码后安装，
+# 与「插件跑在源码宿主上」的真实运行形态一致，也避免 PyPI 版与上游代码漂移。
+# 因此本清单**不再**声明 astrbot 依赖（Dependabot 不跟踪 git 源，强行写只会失效）。
 
 pytest>=8.4.0
 pytest-asyncio>=1.4.0

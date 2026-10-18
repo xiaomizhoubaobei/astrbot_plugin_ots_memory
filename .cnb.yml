@@ -44,12 +44,25 @@ $:
                     - mkdir -p /root/.codebuddy
                     - curl -o /root/.codebuddy/models.json https://cnb-1329111128.cos.ap-guangzhou.myqcloud.com/codebuddy.json
                     - echo "已创建 root/.codebuddy 文件夹并下载 models.json"
-              - name: 克隆Astrbot并重新克隆
+              # AstrBot 宿主一律取自上游官方源码（github.com/AstrBotDevs/AstrBot），
+              # 不再用 pip 装 PyPI 上的 astrbot，避免与上游代码形态/版本漂移：
+              #   - /workspace/AstrBot 是源码目录，供开发期阅读与 IDE 跳转；
+              #   - 再以 editable 方式装进当前 Python 环境，main.py 的导入才能成立。
+              # 只保留一份克隆副本，不再「克隆到 /tmp 再 cp 一遍」重复拉取。
+              - name: 拉取AstrBot官方源码
                 script:
-                  - git clone https://github.com/AstrBotDevs/AstrBot.git /tmp/astrbot-tmp
-                  - cp -r /tmp/astrbot-tmp/astrbot /workspace
-                  - rm -rf /tmp/astrbot-tmp
-                  - git clone https://github.com/AstrBotDevs/AstrBot.git
+                    - |
+                      for i in 1 2 3; do
+                        git clone --depth 1 https://github.com/AstrBotDevs/AstrBot.git /workspace/AstrBot && break
+                        echo "第 $i 次克隆失败，10 秒后重试"; rm -rf /workspace/AstrBot; sleep 10
+                      done
+                      test -d /workspace/AstrBot/astrbot || { echo "❌ AstrBot 源码拉取失败"; exit 1; }
+                      echo "AstrBot 源码已就位"
+              - name: 安装AstrBot源码依赖
+                script:
+                    - pip install --upgrade pip
+                    - pip install -e /workspace/AstrBot
+                    - python -c "import astrbot; print('astrbot 导入成功:', astrbot.__file__)"
 
 main:
       # 注意：本仓库已移除 CNB 侧的覆盖率上报（原「覆盖率测试 + testing:coverage」作业）。

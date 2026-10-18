@@ -13,15 +13,17 @@
 
 本插件以 **AstrBot** 为宿主运行，需先有可用的 AstrBot 实例。
 
-### 1. 安装 AstrBot
+### 1. 安装 AstrBot（源码）
+
+从上游官方仓库拉取源码后安装（要求 `astrbot_version >= 4.0.0`）：
 
 ```bash
-pip install astrbot          # 要求 >= 4.0.0
+git clone https://github.com/AstrBotDevs/AstrBot.git
+pip install -e AstrBot       # 开发期推荐 editable，跟随源码
 astrbot run                  # 默认监听 http://localhost:6185
 ```
 
-或按官方文档部署（Docker / 源码均可）：
-<https://github.com/AstrBotDevs/AstrBot>
+上游仓库：<https://github.com/AstrBotDevs/AstrBot>
 
 ### 2. 安装插件
 
@@ -36,13 +38,18 @@ git clone https://cnb.cool/XMZZUZHI/Astrbot/astrbot_plugin_ots_memory.git \
 
 ## 开发
 
-开发/测试依赖见 `requirements-dev.txt`，其中已包含 AstrBot 宿主
-（`main.py` 依赖 `astrbot.api` / `astrbot.core.*`，缺它无法导入）：
+`main.py` 依赖 `astrbot.api` / `astrbot.core.*`，宿主须先装好——
+**从上游源码安装，不用 PyPI 的 `astrbot` 包**：
 
 ```bash
-pip install -r requirements-dev.txt
-python -m tests.run_coverage    # 跑单测并生成 coverage.xml
+git clone https://github.com/AstrBotDevs/AstrBot.git
+pip install -e AstrBot                    # 宿主源码
+pip install -r requirements-dev.txt       # 运行依赖 + 测试工具
+python -m tests.run_coverage              # 跑单测并生成 coverage.xml
 ```
+
+> `requirements-dev.txt` 不再声明 `astrbot` 依赖：宿主统一走源码安装，
+> CI（`.github/workflows/coverage.yml`）与 CNB（`.cnb.yml`）都按同一口径拉源码。
 
 > 注：AstrBot 宿主是以 pydantic dataclass 形式声明 Tool 的，`plugin` 这类运行时
 > 引用字段须标注为 `Optional[Any]`（不能直接标注插件类），且工具返回值须用

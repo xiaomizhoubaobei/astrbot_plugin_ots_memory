@@ -12,3 +12,6 @@ coverage.xml
 
 # AstrBot 宿主运行时数据（CLI 启动会生成，非本仓库内容）
 data/
+
+# 就地克隆的 AstrBot 宿主源码（开发/CI 从上游拉取，非本仓库内容）
+AstrBot/
