@@ -1,0 +1,274 @@
+name: 'Release 构建'
+
+# 触发条件：推送到 main 分支时触发或手动触发
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '**/*.py'
+  workflow_dispatch:  # 允许手动触发
+
+permissions:
+  contents: read
+  id-token: write
+  actions: read
+
+jobs:
+  build:
+    name: 构建 Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write  # 为签名所必需
+      actions: read
+
+    steps:
+      # 0. 安全加固
+      - name: 加固运行器
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      # 1. 检出代码
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # 获取完整的 git 历史
+
+      # 2. 设置 Python 环境
+      - name: 设置 Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # 3. 获取版本号和插件名称
+      - name: 获取版本号和插件名称
+        id: get_info
+        run: |
+          # 从 metadata.yaml 文件中读取版本号
+          VERSION=$(grep "^version:" metadata.yaml | awk '{print $2}')
+          # 移除可能存在的 'v' 前缀以避免重复
+          VERSION=${VERSION#v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag_name=v$VERSION" >> $GITHUB_OUTPUT
+          # 从 metadata.yaml 文件中读取插件名称
+          PLUGIN_NAME=$(grep "^name:" metadata.yaml | awk '{print $2}')
+          echo "plugin_name=$PLUGIN_NAME" >> $GITHUB_OUTPUT
+
+      # 4. 安装依赖
+      - name: 安装依赖
+        run: |
+          if [ -f requirements.txt ] && [ -s requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            echo "requirements.txt 不存在或为空，跳过依赖安装"
+          fi
+
+      # 5. 创建插件目录
+      - name: 创建插件目录
+        run: |
+          mkdir -p "${{ steps.get_info.outputs.plugin_name }}"
+
+      # 6. 复制插件文件到构建目录
+      - name: 复制插件文件
+        run: |
+          PLUGIN_NAME="${{ steps.get_info.outputs.plugin_name }}"
+
+          # 复制主程序文件
+          cp main.py "$PLUGIN_NAME/" || true
+          # 复制配置文件和依赖文件
+          cp metadata.yaml requirements.txt _conf_schema.json "$PLUGIN_NAME/" || true
+          # 复制插件入口与核心模块（client.py 承载 OTS V4 签名与 REST 交互）
+          cp __init__.py "$PLUGIN_NAME/" || true
+          cp client.py "$PLUGIN_NAME/" || true
+          # 复制 logo 文件（如果存在）
+          cp logo.png "$PLUGIN_NAME/" || true
+
+      # 7. 打包为 zip 文件
+      - name: 创建 zip 包
+        run: |
+          PLUGIN_NAME="${{ steps.get_info.outputs.plugin_name }}"
+          zip -r "${PLUGIN_NAME}.zip" "$PLUGIN_NAME/"
+
+      # 8. 生成 Release Notes
+      - name: 生成 Release Notes
+        id: release_notes
+        run: |
+          # 从上一个标签生成发布说明
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          VERSION=${{ steps.get_info.outputs.version }}
+
+          # 定义生成更新日志的函数
+          generate_changelog_from_git() {
+            local PREVIOUS_TAG=$1
+            local VERSION=$2
+
+            # 初始化分类
+            local FEAT=""
+            local FIX=""
+            local REFACTOR=""
+            local DOCS=""
+            local TEST=""
+            local STYLE=""
+            local CHORE=""
+            local PERF=""
+            local CI=""
+            local BUILD=""
+            local OTHER=""
+
+            # 遍历所有 commit
+            while IFS= read -r commit; do
+              # 提取 commit 类型和消息
+              type=$(echo "$commit" | sed -n 's/^\([a-z]*\):.*/\1/p')
+              msg=$(echo "$commit" | sed 's/^[a-z]*: *//')
+
+              # 按类型分类
+              case "$type" in
+                feat)    FEAT="${FEAT}- ${msg}\n" ;;
+                fix)     FIX="${FIX}- ${msg}\n" ;;
+                refactor) REFACTOR="${REFACTOR}- ${msg}\n" ;;
+                docs)    DOCS="${DOCS}- ${msg}\n" ;;
+                test)    TEST="${TEST}- ${msg}\n" ;;
+                style)   STYLE="${STYLE}- ${msg}\n" ;;
+                chore)   CHORE="${CHORE}- ${msg}\n" ;;
+                perf)    PERF="${PERF}- ${msg}\n" ;;
+                ci)      CI="${CI}- ${msg}\n" ;;
+                build)   BUILD="${BUILD}- ${msg}\n" ;;
+                *)       OTHER="${OTHER}- ${msg}\n" ;;
+              esac
+            done < <(git log ${PREVIOUS_TAG}..HEAD --pretty=format:"%s" --no-merges)
+
+            # 构建更新日志
+            NOTES="## 📦 Release v${VERSION}\n\n"
+
+            # 添加各个分类
+            if [ -n "$FEAT" ]; then
+              NOTES="${NOTES}### ✨ 新功能\n\n${FEAT}\n"
+            fi
+
+            if [ -n "$FIX" ]; then
+              NOTES="${NOTES}### 🐛 修复\n\n${FIX}\n"
+            fi
+
+            if [ -n "$PERF" ]; then
+              NOTES="${NOTES}### ⚡ 性能优化\n\n${PERF}\n"
+            fi
+
+            if [ -n "$REFACTOR" ]; then
+              NOTES="${NOTES}### ♻️ 重构\n\n${REFACTOR}\n"
+            fi
+
+            if [ -n "$DOCS" ]; then
+              NOTES="${NOTES}### 📝 文档\n\n${DOCS}\n"
+            fi
+
+            if [ -n "$TEST" ]; then
+              NOTES="${NOTES}### ✅ 测试\n\n${TEST}\n"
+            fi
+
+            if [ -n "$STYLE" ]; then
+              NOTES="${NOTES}### 💄 样式\n\n${STYLE}\n"
+            fi
+
+            if [ -n "$CI" ]; then
+              NOTES="${NOTES}### 👷 CI\n\n${CI}\n"
+            fi
+
+            if [ -n "$BUILD" ]; then
+              NOTES="${NOTES}### 📦 构建\n\n${BUILD}\n"
+            fi
+
+            if [ -n "$CHORE" ]; then
+              NOTES="${NOTES}### 🔧 杂项\n\n${CHORE}\n"
+            fi
+
+            if [ -n "$OTHER" ]; then
+              NOTES="${NOTES}### 其他\n\n${OTHER}\n"
+            fi
+
+            # 如果没有任何提交
+            if [ "$NOTES" = "## 📦 Release v${VERSION}\n\n" ]; then
+              NOTES="${NOTES}无更新内容\n"
+            fi
+
+            echo -e "$NOTES"
+          }
+
+          if [ -z "$PREVIOUS_TAG" ]; then
+            # 首次 Release
+            NOTES="## 🎉 首次 Release v${VERSION}\n\n这是 Tablestore 长期记忆插件的首次正式 Release。\n\n### 功能特性\n\n- 按需召回：recall_memory Tool，模型需要时主动检索历史记忆\n- 主动记录：save_memory Tool，重要信息一键沉淀进记忆库\n- 自动沉淀：每轮对话结束后异步投递 Tablestore（可关闭）\n- 纯异步实现：原生 aiohttp + OTS V4 签名，无 CLI / Node.js 依赖\n\n### 使用方法\n\n请参考项目 README.md 了解详细使用方法。"
+          else
+            # 检查是否存在 CHANGELOG.md
+            if [ -f "CHANGELOG.md" ]; then
+              # 从 CHANGELOG.md 提取当前版本的更新内容
+              CHANGELOG_CONTENT=$(awk -v version="\\[${VERSION}\\]" '$0 ~ version {found=1} found {print} found && /^## / && !($0 ~ version) {exit}' CHANGELOG.md | tail -n +2)
+
+              if [ -n "$CHANGELOG_CONTENT" ]; then
+                NOTES="## 📦 Release v${VERSION}\n\n${CHANGELOG_CONTENT}"
+              else
+                # CHANGELOG 中没有找到当前版本，从 git log 生成
+                NOTES=$(generate_changelog_from_git "$PREVIOUS_TAG" "$VERSION")
+              fi
+            else
+              # 从 git log 生成更新日志
+              NOTES=$(generate_changelog_from_git "$PREVIOUS_TAG" "$VERSION")
+            fi
+          fi
+
+          # 添加 Release Notes
+          RELEASE_FOOTER="\n\n---\n\n### 📥 安装方法\n\n\`\`\`bash\n# 下载插件包后，解压到 AstrBot 的 data/plugins 目录\n# 重启 AstrBot 服务或在管理面板重载插件\n"
+
+          NOTES="${NOTES}${RELEASE_FOOTER}"
+
+          # 保存到文件
+          echo -e "$NOTES" > release_notes.md
+
+          # 输出到环境变量
+          {
+            echo 'notes<<EOF'
+            cat release_notes.md
+            echo EOF
+          } >> $GITHUB_OUTPUT
+
+      # 9. 生成证据包
+      - name: 生成证据包
+        if: always()  # 即使构建失败也运行
+        uses: OrygnsCode/ci-evidence-pack@8222d7b3b015ce2f72222215bdf9966773036ab1 # main
+        with:
+          sign: 'true'
+
+      # 10. 创建 GitHub Release
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@e598afbe1493e6b1bafb1f389cabb956eab91231 # v3.0.3
+        with:
+          tag_name: ${{ steps.get_info.outputs.tag_name }}
+          name: Release ${{ steps.get_info.outputs.version }}
+          body: |
+            ${{ steps.release_notes.outputs.notes }}
+
+            ---
+
+            ## 📦 证据包说明
+
+            本 Release 包含以下文件：
+
+            - **${{ steps.get_info.outputs.plugin_name }}.zip**: 插件安装包
+            - **evidence-bundle.tar.gz**: CI 证据包（包含源代码、Git 元数据、依赖项、SBOM 等）
+            - **evidence-bundle.tar.gz.sig**: 证据包的 Sigstore 签名
+            - **evidence-bundle.tar.gz.crt**: 证据包的签名证书
+
+            证据包用于合规性审计和构建验证，可以使用以下命令验证：
+
+            ```bash
+            ci-evidence-pack verify evidence-bundle.tar.gz
+            ```
+          draft: false
+          prerelease: false
+          files: |
+            ${{ steps.get_info.outputs.plugin_name }}.zip
+            _evidence_dist/*.tar.gz
+            _evidence_dist/*.sig
+            _evidence_dist/*.crt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
