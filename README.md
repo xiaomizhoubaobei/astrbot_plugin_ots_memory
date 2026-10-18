@@ -9,6 +9,15 @@
 - **自动沉淀**：每轮对话结束后异步投递到 Tablestore 供后续沉淀（可关闭）
 - **纯异步实现**：原生 aiohttp + OTS V4 签名，无需 CLI 或 Node.js 依赖
 
+## 插件市场分类
+
+按 AstrBot 插件市场规范（`metadata.yaml` 可选字段）标注：
+
+| 字段 | 取值 | 说明 |
+|---|---|---|
+| `category` | `ai_tools` | 市场分类 key（官方枚举：`entertainment` / `utilities` / `ai_tools` / `integrations` / `productivity`） |
+| `tags` | `长期记忆`、`记忆`、`知识库`、`阿里云`、`表格存储` | 用于市场搜索与分类的标签列表 |
+
 ## 安装
 
 本插件以 **AstrBot** 为宿主运行，需先有可用的 AstrBot 实例。
