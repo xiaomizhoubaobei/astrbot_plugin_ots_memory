@@ -28,6 +28,7 @@ AstrBot 的记忆默认属于「上下文窗口」——窗口一滑，人也就
 - **按需召回**：`recall_memory` 工具交给模型自己判断何时调用，不做无脑注入，省 Token 也省延迟
 - **主动记录**：`save_memory` 工具，模型遇到用户偏好、约定、重要事实时一键落库
 - **自动沉淀**：`auto_record` 开启后，每轮对话异步投递 `AddMemories`，失败只告警不打扰对话
+- **空间隔离**：基于 `app_id` 命名空间划分，支持跨会话记忆与多应用隔离
 - **纯异步实现**：`aiohttp` + 自研 OTS V4 签名（HMAC-SHA256），不依赖庞大的 SDK
 - **失败即降级**：配置不全时插件只警告不崩溃，工具返回可读的中文错误，不外抛堆栈
 
@@ -35,24 +36,28 @@ AstrBot 的记忆默认属于「上下文窗口」——窗口一滑，人也就
 
 本插件以 **AstrBot** 为宿主，需先有可用的 AstrBot 实例（要求 `astrbot_version >= 4.0.0`）。
 
-### 1. 准备宿主 AstrBot
+### 快捷安装（推荐）
 
-从上游官方仓库拉取源码安装（<https://github.com/AstrBotDevs/AstrBot>）：
+- **插件市场**：在 AstrBot Web 管理面板进入「插件市场」，搜索 `Tablestore 长期记忆`，点击一键安装。
+- **指令安装**：在任意已配置的管理会话中发送：
+  ```text
+  /plugin get https://github.com/xiaomizhoubaobei/astrbot_plugin_ots_memory
+  ```
 
-```bash
-git clone https://github.com/AstrBotDevs/AstrBot.git
-pip install -e AstrBot       # 开发期推荐 editable，跟随源码
-astrbot run                  # 默认监听 http://localhost:6185
-```
+### 手动安装（开发者）
 
-### 2. 安装插件
+1. **准备宿主 AstrBot**：从上游官方仓库拉取源码安装（<https://github.com/AstrBotDevs/AstrBot>）：
+   ```bash
+   git clone https://github.com/AstrBotDevs/AstrBot.git
+   pip install -e AstrBot       # 开发期推荐 editable，跟随源码
+   astrbot run                  # 默认监听 http://localhost:6185
+   ```
 
-把本仓库放进 AstrBot 的 `data/plugins/` 目录后重启，或在管理面板里重载：
-
-```bash
-git clone https://cnb.cool/XMZZUZHI/Astrbot/astrbot_plugin_ots_memory.git \
-  data/plugins/astrbot_plugin_ots_memory
-```
+2. **安装插件**：把本仓库克隆进 AstrBot 的 `data/plugins/` 目录后重启或重载：
+   ```bash
+   git clone https://cnb.cool/XMZZUZHI/Astrbot/astrbot_plugin_ots_memory.git \
+     data/plugins/astrbot_plugin_ots_memory
+   ```
 
 ## 前置条件
 
@@ -62,6 +67,8 @@ git clone https://cnb.cool/XMZZUZHI/Astrbot/astrbot_plugin_ots_memory.git \
 ```bash
 tablestore-agent-cli memory create --name huawu_memory
 ```
+
+> **安全建议**：建议使用仅授予当前 Tablestore 实例/Memory Store 操作权限的 RAM 子账号 AccessKey，避免直接使用阿里云主账号 AK。
 
 ## 配置
 
