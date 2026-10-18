@@ -6,3 +6,10 @@ version: 1.0.0
 author: 祁筱欣
 repo: https://cnb.cool/XMZZUZHI/Astrbot/astrbot_plugin_ots_memory
 astrbot_version: ">=4.0.0"
+category: ai_tools
+tags:
+  - 长期记忆
+  - 记忆
+  - 知识库
+  - 阿里云
+  - 表格存储
