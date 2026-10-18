@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from astrbot.api import AstrBotConfig, FunctionTool, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -15,6 +15,15 @@ from pydantic import Field
 from pydantic.dataclasses import dataclass
 
 from .client import OTSMemoryClient
+
+if TYPE_CHECKING:  # pragma: no cover - 类型检查专用分支
+    # 类型检查阶段：字段就是插件类本身，便于 mypy 追踪 plugin.xxx 的用法
+    PluginRef = "OTSMemoryPlugin"
+else:
+    # 运行期：必须是 pydantic 能建模的类型。写成具体类会触发
+    # 「任意类无法生成 schema」而直接报错（字段上的 exclude=True 只有写在
+    # Annotated 里才会被识别）。它只是内部引用，不参与校验/序列化，故用 Any。
+    PluginRef = Any
 
 
 @dataclass
@@ -39,7 +48,7 @@ class RecallMemoryTool(FunctionTool[AstrAgentContext]):
         }
     )
 
-    plugin: Optional["OTSMemoryPlugin"] = Field(default=None, exclude=True)
+    plugin: Optional[PluginRef] = Field(default=None, exclude=True)  # type: ignore[valid-type]
 
     async def call(
         self,
@@ -101,7 +110,7 @@ class SaveMemoryTool(FunctionTool[AstrAgentContext]):
         }
     )
 
-    plugin: Optional["OTSMemoryPlugin"] = Field(default=None, exclude=True)
+    plugin: Optional[PluginRef] = Field(default=None, exclude=True)  # type: ignore[valid-type]
 
     async def call(
         self,

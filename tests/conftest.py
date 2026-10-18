@@ -19,7 +19,12 @@
 
 from __future__ import annotations
 
+# 再补一步宿主打桩：``main.py`` 依赖 AstrBot 宿主，未装宿主的环境里导入会直接
+# 失败，覆盖率也就恒为 0%。必须在任何测试模块导入 ``main`` 之前完成（conftest
+# 先于收集阶段执行）。装了真实宿主时该模块会自动让位，不打桩。
+from . import astrbot_stub as astrbot_stub
+
 # 导入即注册包视图，供下方测试模块的顶层包名导入使用
 from .package_view import PACKAGE_VIEW_MODE as PACKAGE_VIEW_MODE
 
-__all__ = ["PACKAGE_VIEW_MODE"]
+__all__ = ["PACKAGE_VIEW_MODE", "astrbot_stub"]

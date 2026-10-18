@@ -17,6 +17,7 @@ coverage 在**启动阶段**就解析 ``--source``，而彼时 pytest 还没加�
 
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
@@ -36,12 +37,30 @@ _OMIT = ["tests/*", "ai-audit/*"]
 _PYTEST_ARGS = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else ["tests"]
 
 
+def _mark_package_measured() -> None:
+    """让 coverage 认下「包名已被测量」，否则报告会判它从没被测过.
+
+    coverage 的 ``--source=<包名>`` 是按**调用方 frame 的模块名**匹配的
+    （见 ``coverage.inorout.name_for_module``）：只有当某段被测代码的
+    ``__name__`` 以包名开头（如 ``astrbot_plugin_ots_memory.client``）时，
+    才算这个 source 命中过。pytest 跑测试时，仓库根的 ``main.py`` 会以
+    ``__main__`` / ``main`` 的名字出现，包名本身便一直「未命中」，收尾时
+    coverage 就打出 ``Module ... was previously imported, but not measured``。
+
+    这里在 coverage **已启动**的前提下，按真实包名导入一次包（其
+    ``__init__.py`` 此时被记入数据，且模块名正是包名），source 即视为命中。
+    文件本身 0 行，对覆盖率分子分母无影响。
+    """
+    importlib.import_module(PACKAGE_NAME)
+
+
 def main() -> int:
     """跑测试、打印报告并写出 coverage.xml，返回退出码."""
     cov = Coverage(source=[PACKAGE_NAME], omit=_OMIT, config_file=False)
 
     if "--report-only" not in sys.argv:
         cov.start()
+        _mark_package_measured()
         try:
             import pytest
 
