@@ -18,6 +18,16 @@ from pydantic.dataclasses import dataclass
 from .client import OTSMemoryClient
 
 
+def _segment_texts(segments: Any) -> list[str]:
+    """取出消息段里的非空文本，跳过纯图片/表情等无文本段."""
+    texts = []
+    for seg in segments or []:
+        content = getattr(seg, "text", None)
+        if content:
+            texts.append(content)
+    return texts
+
+
 def _tool_result(text: str, *, is_error: bool = False) -> ToolExecResult:
     """构造工具执行结果.
 
@@ -200,31 +210,27 @@ class OTSMemoryPlugin(Star):
         if not self.auto_record or self.client is None:
             return
 
-        messages = []
-        for seg in event.get_messages():
-            content = getattr(seg, "text", None)
-            if content:
-                messages.append({"role": "user", "content": content})
+        messages = [
+            {"role": "user", "content": text}
+            for text in _segment_texts(event.get_messages())
+        ]
 
-        result_text = None
+        # 只取回复链里第一段文本作为 assistant 内容
         result = event.get_result()
-        if result:
-            chains = getattr(result, "chain", [])
-            for seg in chains:
-                content = getattr(seg, "text", None)
-                if content:
-                    result_text = content
-                    break
+        chains = getattr(result, "chain", []) if result else []
+        reply_texts = _segment_texts(chains)
+        result_text = reply_texts[0] if reply_texts else None
 
         if not messages or not result_text:
             return
 
         messages.append({"role": "assistant", "content": result_text})
 
+        client = self.client
+
         async def _background_save():
             try:
-                assert self.client is not None
-                await self.client.add_memories(
+                await client.add_memories(
                     store_name=self.store_name,
                     app_id=self.app_id,
                     tenant_id=self.tenant_id,
