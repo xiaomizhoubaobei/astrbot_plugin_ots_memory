@@ -1,6 +1,6 @@
 # 开发/测试依赖：由 Dependabot 跟踪（pip ecosystem，directory=/），
 # 避免测试工具被工作流内联安装而长期得不到更新。
 -r requirements.txt
-pytest>=8.0
+pytest>=8.4.0
 pytest-asyncio>=1.4.0
 coverage>=7.0
