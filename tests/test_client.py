@@ -351,3 +351,46 @@ async def test_error_status_raises_runtime_error(fake_aiohttp) -> None:
         await client.search_memories(
             store_name="s", app_id="a", tenant_id="t", query="q"
         )
+
+
+def test_uses_astrbot_api_logger() -> None:
+    """日志记录器必须来自 astrbot.api，禁止内置 logging / 第三方日志库.
+
+    上架规范硬性要求：``from astrbot.api import logger``。此处锁定两点——
+    模块内不再导入内置 ``logging``，且 ``logger`` 就是 astrbot.api 提供的那一个。
+    """
+    from astrbot.api import logger as astrbot_logger
+    from astrbot_plugin_ots_memory import client as client_mod
+
+    assert client_mod.logger is astrbot_logger
+    assert "logging" not in client_mod.__dict__
+
+
+@pytest.mark.asyncio
+async def test_error_status_logs_via_astrbot_logger(fake_aiohttp, monkeypatch) -> None:
+    """上游出错时应落一条 error 日志，便于宿主侧统一收集."""
+    from astrbot_plugin_ots_memory import client as client_mod
+
+    class _ErrResponse(_FakeResponse):
+        def __init__(self) -> None:
+            super().__init__({}, status=503)
+
+        async def text(self) -> str:
+            return "unavailable"
+
+    class _ErrSession(_FakeSession):
+        def post(self, url: str, headers: dict, data: bytes) -> _ErrResponse:
+            return _ErrResponse()
+
+    calls: list[str] = []
+    monkeypatch.setattr(client_mod.logger, "error", lambda msg: calls.append(msg))
+    monkeypatch.setattr(client_mod.aiohttp, "ClientSession", _ErrSession)
+
+    client = _make_client()
+    with pytest.raises(RuntimeError):
+        await client.search_memories(
+            store_name="s", app_id="a", tenant_id="t", query="q"
+        )
+
+    assert len(calls) == 1
+    assert "status=503" in calls[0]

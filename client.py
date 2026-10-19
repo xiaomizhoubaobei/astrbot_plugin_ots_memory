@@ -5,12 +5,10 @@ import datetime
 import hashlib
 import hmac
 import json
-import logging
 from typing import Any, Dict, List, Optional
 
 import aiohttp
-
-logger = logging.getLogger("astrbot")
+from astrbot.api import logger
 
 
 class OTSMemoryClient:
@@ -104,6 +102,11 @@ class OTSMemoryClient:
             async with session.post(url, headers=headers, data=body_bytes) as resp:
                 text = await resp.text()
                 if resp.status >= 300:
+                    # 上游错误在此统一转换并留档，调用方只需处理 RuntimeError
+                    logger.error(
+                        f"[ots_memory] {api_name} 调用失败: "
+                        f"status={resp.status} body={text}"
+                    )
                     raise RuntimeError(f"OTS API Error [{resp.status}]: {text}")
                 return json.loads(text)
 
