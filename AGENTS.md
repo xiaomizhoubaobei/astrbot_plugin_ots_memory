@@ -5,9 +5,11 @@
 > **不构成 Agent 的身份**。无论由哪个运行时拉起，Agent 都以 **SuperNPC** 的身份与人格行事，**严禁**自称成某个工具品牌。
 >
 > 本文件是仓库内**唯一的 Agent 入口文档**，同时承载两类内容：
-> **第 1~10 章**为组织级通用协作规范（怎么干活，含第 9 章「语音回复流程」与第 10 章「阿里云百炼记忆库」）；**第 11 章**为 `astrbot_plugin_models_ai` 本项目的技术上下文（这是什么项目）。
+> **第 1~10 章**为组织级通用协作规范（怎么干活，含第 9 章「语音回复流程」与第 10 章「阿里云百炼记忆库」）；**第 11 章**为 `astrbot_plugin_ots_memory` 本项目的技术上下文（这是什么项目）。
 >
-> 项目：`astrbot_plugin_models_ai` — AstrBot 的 AI 图像生成插件，接入 Gitee AI，支持文生图、风格转换、AI 图片编辑与多 Key 轮询。
+> 项目：`astrbot_plugin_ots_memory` — AstrBot 的长期记忆插件，基于阿里云表格存储（Tablestore）Memory Store，支持按需召回、主动记录与每轮对话自动沉淀。
+>
+> 📜 **面向人的社区规范**见 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)（贡献者行为准则，含涉密信息、AI 参与边界、记忆数据伦理与漏洞披露约定）；本文件规则与之冲突时，以更严格者为准。
 
 ## 1. Git 提交规范 (Git Commits)
 
@@ -80,7 +82,7 @@ bash install_gpg_keys.sh
 ## 2. 编码与代码规范 (Coding Standards)
 
 ### 2.1 语言与类型
-- 核心代码库使用 **Python** 编写（本项目为 AstrBot 插件，要求 Python 3.12+）。
+- 核心代码库使用 **Python** 编写（本项目为 AstrBot 插件，运行要求 Python 3.10+，CI 使用 3.12 校验）。
 - 函数与关键变量必须提供**类型注解**，并通过 `pre-commit` 中的 `mypy`（`ignore-missing-imports`）检查。
 - 禁止为图省事滥用 `Any`；能用具体类型或 `TypedDict` / `dataclass` 表达的地方必须明确类型。
 
@@ -88,7 +90,7 @@ bash install_gpg_keys.sh
 - 变量和函数命名必须具备明确语义，遵循 PEP 8：函数/变量用 `snake_case`，类名用 `PascalCase`，常量用 `UPPER_SNAKE_CASE`。
 - **必须提供中文注释**。特别是在以下场景：
   - 核心逻辑（如控制流、并发调度）。
-  - 关键阈值与特殊补丁逻辑（如多 API Key 轮询、429 限流降级、防抖常量 `DEBOUNCE_SECONDS`）。
+  - 关键阈值与特殊补丁逻辑（如 `top_k` / `min_score` 取值边界、请求 ID 截断长度、后台沉淀的降级路径）。
   - 正则表达式和复杂的 API 请求。
 
 ### 2.3 错误处理与日志
@@ -142,10 +144,15 @@ bash install_gpg_keys.sh
 
 ## 5. 特定业务逻辑指导 (Domain Specifics)
 
-### 5.1 上游 AI 接口调用（Gitee AI）
-- **多 Key 轮询**：通过 `GiteeAIClient._get_next_api_key()` 按索引轮询多个 API Key；新增/调整 Key 解析逻辑时须保持 `parse_api_keys` 对「字符串」与「列表」两种配置的兼容。
-- **限流与错误转换**：上游为 OpenAI 兼容接口，`429 Too Many Requests`、认证失败、`5xx` 等异常须在 API 层统一转换为中文 `RuntimeError`，由命令层捕获后回包友好提示，禁止把原始堆栈直接抛给用户。
-- **防抖与并发**：请求统一走 `core/command_utils.check_rate_limit`（`DEBOUNCE_SECONDS=10`）与 `is_processing` 互斥，避免同一用户高频触发生图。
+### 5.1 上游接口调用（阿里云 Tablestore Memory Store）
+- **签名与请求**：`client.py` 内自研 OTS V4 签名（HMAC-SHA256 + Canonical Request），禁止为了「省事」引入庞大 SDK 或把签名逻辑改写为非标准实现。
+- **错误转换**：上游非 2xx 一律在上层转换为中文 `RuntimeError`（`OTS API Error [<status>]: <body>`），由工具层捕获后返回可读提示，禁止把原始堆栈直接抛给用户。
+- **日志脱敏**：上游错误日志只记录 `status` 与截断后的 `x-ots-requestid`（≤64 字符），**禁止**把响应体整段落盘——错误体可能极大或回显用户记忆内容。
+- **失败降级**：任何异步沉淀（`auto_record`）异常只记录 `warning`，不得逃逸到对话链；配置不全时插件**禁用自身而非崩溃**。
+
+### 5.2 记忆数据与凭据
+- AccessKey / SecretKey 只从插件配置读取，**禁止**硬编码、禁止进日志、禁止进 Issue / PR 评论。
+- 单测与示例一律使用假数据，**禁止**触碰真实用户的记忆内容（详见 `CODE_OF_CONDUCT.md` 4.3）。
 
 ## 6. CNB OpenAPI 操作规范 (CNB OpenAPI Operations)
 
@@ -469,7 +476,7 @@ SuperNPC 通过 **`/app/scripts/bailian-memory.py`** 接入**阿里云百炼记�
 
 - 官方文档：<https://docs.agent.bailian.aliyun.com/zh/api/memory/fragments/add-memory>（同组还有「搜索 / 列出 / 更新 / 删除记忆」与「用户画像」接口）。
 
-> **📌 运行时 vs 仓库的边界（先读这条，避免照抄路径撞空）**：本脚本是 **SuperNPC 运行时能力**，真身固化在**运行时镜像的 `/app/scripts/bailian-memory.py`**，与物理上由哪个仓库（如本仓库 `astrbot_plugin_models_ai`，一个 AstrBot 生图插件）拉起 NPC **毫无血缘**。因此：
+> **📌 运行时 vs 仓库的边界（先读这条，避免照抄路径撞空）**：本脚本是 **SuperNPC 运行时能力**，真身固化在**运行时镜像的 `/app/scripts/bailian-memory.py`**，与物理上由哪个仓库（如本仓库 `astrbot_plugin_ots_memory`，一个 AstrBot 长期记忆插件）拉起 NPC **毫无血缘**。因此：
 > 1. 本章所有命令示例一律使用**运行时绝对路径 `/app/scripts/bailian-memory.py`**，可直接复制执行，**不依赖当前工作目录**；
 > 2. **不要**把该脚本复制进被拉起仓库（会污染其项目边界），也**不要**假定被拉起仓库内存在 `scripts/bailian-memory.py`；
 > 3. 要改脚本本体，应去 **SuperNPC 仓库**改；被拉起仓库要动的只是**文档口径**（同类教训见 1.5 节：早期 `scripts/gpg-setup.sh` 等文件本仓库并不存在的注记）；
@@ -934,13 +941,21 @@ python3 /app/scripts/bailian-memory.py delete --node-id node_abc
 
 ```
 .
-├── client.py               # TablestoreOTSClient：OTS V4 签名计算与 REST API 交互（SearchMemories, AddMemories 等）
-├── main.py                 # 插件主入口：OTSMemoryPlugin(Star) 类、LLM 工具注册、事件钩子监听与生命周期管理
+├── client.py               # OTSMemoryClient：OTS V4 签名计算与 SearchMemories / AddMemories 请求
+├── main.py                 # 插件主入口：OTSMemoryPlugin(Star)、两个 LLM 工具、auto_record 钩子
+├── __init__.py             # 包入口（插件目录名即包名）
 ├── metadata.yaml           # 插件元数据（name/display_name/version/author/repo 等）
 ├── _conf_schema.json       # AstrBot 配置 schema（endpoint/instance_name/AK/SK/app_id 等）
-├── codecov.yml             # Codecov 覆盖率门禁配置文件
+├── pyproject.toml          # 工具配置（pytest / coverage / mypy），非打包元数据
+├── codecov.yml             # Codecov 覆盖率口径与门禁配置
 ├── requirements.txt        # 核心依赖（aiohttp）
+├── requirements-dev.txt    # 开发与测试依赖（pytest / coverage；宿主走源码安装）
+├── tests/                  # 单测与覆盖率启动器（python -m tests.run_coverage）
+├── ai-audit/               # AI 告警分流示例资产（不计入覆盖率分母）
+├── .github/workflows/      # GitHub Actions（覆盖率、CodeQL、安全扫描、发布等）
 ├── install_gpg_keys.sh     # GPG 签名环境自动化配置脚本
+├── CODE_OF_CONDUCT.md      # 贡献者行为准则（面向人的社区规范）
+├── AGENTS.md               # 本文件：Agent / 人的协作规范
 ├── .cnb.yml                # CNB 流水线配置
 ├── .pre-commit-config.yaml # pre-commit 代码规范校验配置
 └── README.md               # 插件说明文档

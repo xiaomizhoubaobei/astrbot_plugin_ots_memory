@@ -170,8 +170,8 @@ python -m tests.run_coverage              # 跑单测并生成 coverage.xml
 pip install pre-commit && pre-commit run --all-files
 ```
 
-覆盖 ruff / mypy（`ignore_missing_imports`，要求类型注解）等钩子，详见
-[`.pre-commit-config.yaml`](.pre-commit-config.yaml)。
+覆盖 black / flake8 / isort / mypy（`ignore_missing_imports`，要求类型注解）/
+pydocstyle 等钩子，详见 [`.pre-commit-config.yaml`](.pre-commit-config.yaml)。
 
 ## 持续集成
 
@@ -188,6 +188,13 @@ pip install pre-commit && pre-commit run --all-files
 | 工具返回「OTS 记忆插件客户端未初始化」 | 同上，客户端未构造成功 |
 | 工具返回「检索记忆失败: OTS API Error [xxx]」 | 上游返回非 2xx，按状态码查 OTS 侧（鉴权 / 实例名 / 网络） |
 | 徽章长期灰色 | 仓库为 GitHub 镜像，需在 Codecov 侧完成仓库授权 |
+
+## 参与贡献
+
+- **行为准则**：请先阅读 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)。它不只讲「别骂人」，
+  还写明了本项目的专项约定——涉密信息不入库、AI 辅助的边界、记忆数据伦理、漏洞私下披露。
+- **提交规范**：中文提交信息、Angular 格式、签名提交、先跑 `pre-commit`；一律走 PR，不直推 `main`。
+- **安全问题**：请勿开公开 Issue，走 Security Advisory 或邮件私下报告。
 
 ## Issues
 
