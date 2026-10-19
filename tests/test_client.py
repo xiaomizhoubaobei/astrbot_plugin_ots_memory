@@ -394,3 +394,49 @@ async def test_error_status_logs_via_astrbot_logger(fake_aiohttp, monkeypatch) -
 
     assert len(calls) == 1
     assert "status=503" in calls[0]
+
+
+@pytest.mark.asyncio
+async def test_error_log_omits_body_and_truncates_request_id(
+    fake_aiohttp, monkeypatch
+) -> None:
+    """错误日志只记状态与截断后的请求 ID，不得落盘上游响应体.
+
+    上游非 2xx 响应体可能极大或回显用户数据，同一份内容已随 RuntimeError
+    抛给调用方，因此这里锁死：日志里不出现响应体，请求 ID 超长须截断。
+    """
+    from astrbot_plugin_ots_memory import client as client_mod
+
+    huge_body = "sensitive-echo-" * 1000
+
+    class _ErrResponse(_FakeResponse):
+        def __init__(self) -> None:
+            super().__init__({}, status=429)
+            self.headers = {"x-ots-requestid": "R" * 200}
+
+        async def text(self) -> str:
+            return huge_body
+
+    class _ErrSession(_FakeSession):
+        def post(self, url: str, headers: dict, data: bytes) -> _ErrResponse:
+            return _ErrResponse()
+
+    calls: list[str] = []
+    monkeypatch.setattr(client_mod.logger, "error", lambda msg: calls.append(msg))
+    monkeypatch.setattr(client_mod.aiohttp, "ClientSession", _ErrSession)
+
+    client = _make_client()
+    with pytest.raises(RuntimeError) as exc_info:
+        await client.search_memories(
+            store_name="s", app_id="a", tenant_id="t", query="q"
+        )
+
+    assert len(calls) == 1
+    logged = calls[0]
+    assert "status=429" in logged
+    assert ("R" * 64) in logged
+    # 请求 ID 截断到 64 字符，响应体一律不进日志
+    assert "R" * 65 not in logged
+    assert "sensitive-echo" not in logged
+    # 响应体仍完整保留在异常里，交由调用方决定如何处置
+    assert "sensitive-echo" in str(exc_info.value)

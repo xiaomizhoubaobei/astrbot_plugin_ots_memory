@@ -103,7 +103,10 @@ class OTSMemoryClient:
                 text = await resp.text()
                 if resp.status >= 300:
                     # 请求 ID 用于向上游排障，截断到固定长度，避免异常响应无限膨胀日志
-                    request_id = (resp.headers.get("x-ots-requestid") or "")[:64]
+                    raw_request_id = getattr(resp, "headers", {}).get(
+                        "x-ots-requestid", ""
+                    )
+                    request_id = str(raw_request_id)[:64]
                     # 仅记录状态与请求 ID：上游错误体可能极大或回显用户数据，
                     # 且同一份内容已随 RuntimeError 抛给调用方留档，此处不重复落盘
                     logger.error(
