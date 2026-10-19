@@ -102,10 +102,13 @@ class OTSMemoryClient:
             async with session.post(url, headers=headers, data=body_bytes) as resp:
                 text = await resp.text()
                 if resp.status >= 300:
-                    # 上游错误在此统一转换并留档，调用方只需处理 RuntimeError
+                    # 请求 ID 用于向上游排障，截断到固定长度，避免异常响应无限膨胀日志
+                    request_id = (resp.headers.get("x-ots-requestid") or "")[:64]
+                    # 仅记录状态与请求 ID：上游错误体可能极大或回显用户数据，
+                    # 且同一份内容已随 RuntimeError 抛给调用方留档，此处不重复落盘
                     logger.error(
                         f"[ots_memory] {api_name} 调用失败: "
-                        f"status={resp.status} body={text}"
+                        f"status={resp.status} request_id={request_id or '<none>'}"
                     )
                     raise RuntimeError(f"OTS API Error [{resp.status}]: {text}")
                 return json.loads(text)
