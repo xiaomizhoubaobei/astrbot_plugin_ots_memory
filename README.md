@@ -61,12 +61,14 @@ AstrBot 的记忆默认属于「上下文窗口」——窗口一滑，人也就
 
 ## 前置条件
 
-在 [阿里云表格存储控制台](https://otsconsole.aliyun.com/) 创建实例与 Memory Store，
-或使用 `tablestore-agent-cli` 创建：
+在 [阿里云表格存储控制台](https://otsconsole.aliyun.com/) 创建实例（按量付费/CU模式）并开通 Memory Store，
+或使用 `tablestore-agent-cli` 命令行快速创建：
 
 ```bash
 tablestore-agent-cli memory create --name huawu_memory
 ```
+
+> **提示（免手动建表）**：控制台创建好实例与 Memory Store 后，无需手动创建底层数据表或二级索引。插件运行时会通过 Tablestore Memory Store API 自动管理记忆落库与检索。
 
 > **安全建议**：建议使用仅授予当前 Tablestore 实例/Memory Store 操作权限的 RAM 子账号 AccessKey，避免直接使用阿里云主账号 AK。
 
@@ -106,6 +108,29 @@ tablestore-agent-cli memory create --name huawu_memory
   "auto_record": true
 }
 ```
+
+## 推荐人格提示词（Prompt 引导）
+
+插件提供了 `recall_memory` 与 `save_memory` 工具。为避免模型“空有工具却不知道用”，**强烈建议在你的 Bot 人格设定（System Prompt）中加入明确的工具使用引导**：
+
+```markdown
+## 长期记忆调用准则
+1. **主动回忆**：遇到用户提及前情、偏好、过去约定或模糊信息时，优先调用 `recall_memory(query)` 查询云端记忆，不要直接脑补编造。
+2. **主动沉淀**：当用户明确表述个人偏好（如喜好、习惯）、重要待办、关键人际关系或重大事实时，调用 `save_memory(fact)` 记入云端。
+3. **保持自然**：无需在对话中刻意声明「我已经查了记忆」，自然将回忆内容融合进回复即可。
+```
+
+这样配合 `auto_record`（对话后自动沉淀），Bot 会在日常交互中自主沉淀认知，真正实现“越聊越灵动”。
+
+## 方案对比
+
+| 维度 | 传统全量/前置检索记忆 (如常见向量库方案) | Tablestore Memory Store (本插件) |
+| --- | --- | --- |
+| **召回机制** | 每轮对话前无脑检索，强行注入 Context | **Tool 按需调用**，模型按需自主检索，零上下文污染 |
+| **Token 消耗** | 极高（每次无论用不用都塞满提示词） | **极低**（仅在触发 Tool 时消费少量上下文） |
+| **存储扩展性** | 本地 SQLite / JSON / Chroma，数据量大后易膨胀变慢 | **云原生盘古底座**，百万并发无感扩容，容量无上限 |
+| **环境依赖** | 需要本地额外起向量库/安装复杂 Python C 扩展 | **零额外笨重依赖**，原生 aiohttp + HMAC-SHA256 签名 |
+| **模型智商影响** | 易被大量无关前情稀释注意力，产生幻觉或越聊越呆 | **极高专注度**，上下文保持干净，逻辑更聚焦 |
 
 ## 工作原理
 
