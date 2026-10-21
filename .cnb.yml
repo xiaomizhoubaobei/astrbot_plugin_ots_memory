@@ -91,7 +91,6 @@ main:
       # 发布包边界见 .cnb-package-ignore（与 GitHub Actions release.yml 共用同一份忽略清单），
       # 个人工程化资产（AGENTS.md / install_gpg_keys.sh / ai-audit / .github 等）
       # 不会被 AstrBot 加载，也不该随插件装进使用者目录。
-      push:
         - imports:
             - https://cnb.cool/XMZZUZHI/key/-/blob/main/Package.yml
           stages:
