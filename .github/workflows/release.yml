@@ -102,7 +102,45 @@ jobs:
       - name: 创建 zip 包
         run: |
           PLUGIN_NAME="${{ steps.get_info.outputs.plugin_name }}"
-          zip -r "${PLUGIN_NAME}.zip" "$PLUGIN_NAME/"
+
+          # 按 .cnb-package-ignore 过滤：清单是发布包边界的唯一来源（头注释有取舍标准），
+          # 与 CNB 打包作业共用同一份清单，避免两边口径漂移。
+          # 构建目录里只有上一步复制进来的文件，故直接用 zip -x 过滤即可。
+          ZIP_EXCLUDES=()
+          while IFS= read -r entry; do
+            case "$entry" in
+              ''|'#'*) continue ;;
+            esac
+            ZIP_EXCLUDES+=(-x "${PLUGIN_NAME}/$entry" "${PLUGIN_NAME}/$entry/*")
+          done < .cnb-package-ignore
+          zip -r "${PLUGIN_NAME}.zip" "$PLUGIN_NAME/" "${ZIP_EXCLUDES[@]}"
+
+          echo "== 发布包内容 =="
+          unzip -l "${PLUGIN_NAME}.zip"
+
+      # 7.1 校验发布包边界：忽略清单条目不得出现在包内，必需文件不得缺失
+      - name: 校验发布包边界
+        run: |
+          PLUGIN_NAME="${{ steps.get_info.outputs.plugin_name }}"
+          ARTIFACT="${PLUGIN_NAME}.zip"
+          LIST=$(unzip -l "$ARTIFACT" | awk '{print $4}')
+
+          while IFS= read -r entry; do
+            case "$entry" in
+              ''|'#'*) continue ;;
+            esac
+            if echo "$LIST" | grep -qx "${PLUGIN_NAME}/$entry" \
+              || echo "$LIST" | grep -q "^${PLUGIN_NAME}/$entry/"; then
+              echo "::error::发布包内混入了应忽略的条目: $entry"
+              exit 1
+            fi
+          done < .cnb-package-ignore
+
+          for required in main.py __init__.py client.py metadata.yaml requirements.txt _conf_schema.json; do
+            echo "$LIST" | grep -qx "${PLUGIN_NAME}/$required" \
+              || { echo "::error::发布包缺少必需文件: $required"; exit 1; }
+          done
+          echo "发布包边界校验通过"
 
       # 8. 生成 Release Notes
       - name: 生成 Release Notes

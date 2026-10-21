@@ -177,7 +177,8 @@ python -m tests.run_coverage              # 跑单测并生成 coverage.xml
 ├── _conf_schema.json     # 配置 schema
 ├── metadata.yaml         # 插件元数据（版本、分类、标签）
 ├── tests/                # 单测与覆盖率启动器（python -m tests.run_coverage）
-└── ai-audit/             # AI 审计相关资产（不计入覆盖率分母）
+├── ai-audit/             # AI 审计相关资产（不计入覆盖率分母）
+└── .cnb-package-ignore   # 发布包（zip）忽略清单：插件装进宿主时用不到的文件
 ```
 
 ### 两个容易踩的坑
@@ -204,6 +205,25 @@ pydocstyle 等钩子，详见 [`.pre-commit-config.yaml`](.pre-commit-config.yam
 - **发布**：`.github/workflows/release.yml` 依据 `metadata.yaml` 的 `version` 打 tag 并构建 Release
 - **安全扫描**：CodeQL、依赖审计、secret-scanning、Scorecard、tfsec 等工作流
 - **镜像同步**：CNB（`.cnb.yml`）在 `main` 推送时同步到 GitHub 镜像仓库，并以 CNB 侧为准
+- **发布包**：GitHub Release 与 CNB 打包 zip 共用同一份排除清单
+  （[`.cnb-package-ignore`](.cnb-package-ignore)），只装插件运行所需文件
+
+### 发布包里装什么
+
+发布包只含 AstrBot 加载插件真正会读的文件：
+
+```
+astrbot_plugin_ots_memory/
+├── main.py  __init__.py  client.py
+├── metadata.yaml  requirements.txt  _conf_schema.json
+└── logo.png（可选）
+```
+
+`AGENTS.md`、`install_gpg_keys.sh`、`ai-audit/`、`.github/`、`tests/` 等开发 / CI 资产
+一律不进包——它们不会被宿主加载，但会被装进使用者的插件目录；其中拉取私钥、
+改写全局 git 配置的脚本一旦被下游误执行，风险由使用者承担。取舍标准与增删方式
+见 [`.cnb-package-ignore`](.cnb-package-ignore) 头注释；打包作业会逐条断言这些条目
+确实不在包里，断言失败即中断，避免清单与产物悄悄漂移。
 
 ## 常见问题
 

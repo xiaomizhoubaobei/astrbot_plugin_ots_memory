@@ -1,0 +1,27 @@
+# 发布包（.zip）忽略清单
+#
+# 本文件同时被两处打包流程读取，保证「插件发布包」边界只有一处定义：
+#   - GitHub Actions：.github/workflows/release.yml（打包 Release 资产）
+#   - CNB：.cnb.yml 的「打包插件 zip」作业
+#
+# 规则：每行一个**相对插件根目录的顶层条目**（文件或目录名），
+# 空行与 # 开头为注释。清单内条目一旦出现在发布包里，打包作业直接失败。
+#
+# 取舍标准：AstrBot 加载插件时**不会**读取的文件一律进本清单。
+# 这类个人工程化资产（Agent 说明、GPG 密钥脚本、AI 审计示例、CI 流水线）
+# 会被一并装进使用者插件目录，其中涉及拉取密钥与改写全局配置的脚本一旦被
+# 下游误执行，风险由使用者承担——责任边界不该这样传递。
+AGENTS.md
+CODE_OF_CONDUCT.md
+LICENSE
+install_gpg_keys.sh
+ai-audit
+.github
+.cnb.yml
+.cnb-package-ignore
+.pre-commit-config.yaml
+codecov.yml
+pyproject.toml
+requirements-dev.txt
+tests
+.gitignore
