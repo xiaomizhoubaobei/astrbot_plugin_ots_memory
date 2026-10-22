@@ -178,6 +178,7 @@ python -m tests.run_coverage              # 跑单测并生成 coverage.xml
 ├── metadata.yaml         # 插件元数据（版本、分类、标签）
 ├── tests/                # 单测与覆盖率启动器（python -m tests.run_coverage）
 ├── ai-audit/             # AI 审计相关资产（不计入覆盖率分母）
+├── SECURITY.md           # 安全策略：支持范围、漏洞报告渠道与安全实践
 └── .cnb-package-ignore   # 发布包（zip）忽略清单：插件装进宿主时用不到的文件
 ```
 
@@ -204,6 +205,7 @@ pydocstyle 等钩子，详见 [`.pre-commit-config.yaml`](.pre-commit-config.yam
 - **覆盖率**：GitHub Actions [`.github/workflows/coverage.yml`](.github/workflows/coverage.yml) 出报告并上报 Codecov（徽章见顶部）
 - **发布**：`.github/workflows/release.yml` 依据 `metadata.yaml` 的 `version` 打 tag 并构建 Release
 - **安全扫描**：CodeQL、依赖审计、secret-scanning、Scorecard、tfsec 等工作流
+- **安全策略**：支持范围、漏洞报告渠道与安全实践见 [`SECURITY.md`](SECURITY.md)
 - **镜像同步**：CNB（`.cnb.yml`）在 `main` 推送时同步到 GitHub 镜像仓库，并以 CNB 侧为准；
   CNB 不构建插件包，打包只发生在 GitHub 侧
 - **发布包**：由 GitHub Release 按排除清单（[`.cnb-package-ignore`](.cnb-package-ignore)）打包，
@@ -240,7 +242,8 @@ astrbot_plugin_ots_memory/
 - **行为准则**：请先阅读 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)。它不只讲「别骂人」，
   还写明了本项目的专项约定——涉密信息不入库、AI 辅助的边界、记忆数据伦理、漏洞私下披露。
 - **提交规范**：中文提交信息、Angular 格式、签名提交、先跑 `pre-commit`；一律走 PR，不直推 `main`。
-- **安全问题**：请勿开公开 Issue，走 Security Advisory 或邮件私下报告。
+- **安全问题**：请勿开公开 Issue，走 Security Advisory 或邮件私下报告；
+  支持范围、报告清单、响应时限与安全实践详见 [`SECURITY.md`](SECURITY.md)。
 
 ## Issues
 

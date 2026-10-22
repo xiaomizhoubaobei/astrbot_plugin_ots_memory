@@ -5,6 +5,9 @@ desc: 基于阿里云表格存储（Tablestore）Memory Store 的跨会话长期
 version: 0.0.1
 author: 祁筱欣
 repo: https://cnb.cool/XMZZUZHI/Astrbot/astrbot_plugin_ots_memory
+# 安全漏洞私密报告联系邮箱（见 SECURITY.md「报告漏洞」）。
+# AstrBot 元数据校验只强校验必填字段，未知字段会被忽略，故该扩展字段安全。
+security_contact: qixiaoxin@stu.sqxy.edu.cn
 astrbot_version: ">=4.0.0"
 category: ai_tools
 tags:
