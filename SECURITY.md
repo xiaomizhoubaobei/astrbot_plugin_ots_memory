@@ -154,15 +154,15 @@ Release Notes / 安全公告中致谢（如你愿意署名）。
 
 ### 发布包的边界
 
-插件发布包由 GitHub Release 打包：先按复制白名单把
+插件发布包由 GitHub Release 按**复制白名单**打包：只把
 **AstrBot 加载插件真正会读的文件**（`main.py` / `client.py` / `__init__.py` /
 `metadata.yaml` / `requirements.txt` / `_conf_schema.json`，可选 `logo.png`）复制进构建目录，
-再按 [`.cnb-package-ignore`](.cnb-package-ignore) 过滤并逐条断言。
+再整目录打包，并断言包内不得出现白名单之外的条目。
 
 `AGENTS.md`、`install_gpg_keys.sh`、`ai-audit/`、`.github/`、`tests/`、`SECURITY.md` 等
 开发 / CI 资产**一律不进包**——它们不会被宿主加载，却会被铺进使用者的插件目录；
 其中拉取私钥、改写全局 git 配置的脚本一旦被下游误执行，风险由使用者承担。
-`release.yml` 的打包作业会逐条断言这些条目确实不在包里，断言失败即中断。
+`release.yml` 的打包作业会断言包内只含白名单文件，混入其它条目即中断。
 
 > 安全含义：**如果你在插件目录里同时看到 `install_gpg_keys.sh` 这类脚本，说明装的不是官方发布包**，
 > 请改用 Release 提供的 zip。

@@ -103,43 +103,46 @@ jobs:
         run: |
           PLUGIN_NAME="${{ steps.get_info.outputs.plugin_name }}"
 
-          # 按 .cnb-package-ignore 过滤：本清单的唯一读取方就是这里（头注释有取舍标准）。
-          # CNB 不打包插件包（.cnb.yml 只把代码同步到 GitHub 镜像仓库），不存在第二处读取方。
-          # 构建目录里只有上一步复制进来的文件，故直接用 zip -x 过滤即可。
-          ZIP_EXCLUDES=()
-          while IFS= read -r entry; do
-            case "$entry" in
-              ''|'#'*) continue ;;
-            esac
-            ZIP_EXCLUDES+=(-x "${PLUGIN_NAME}/$entry" "${PLUGIN_NAME}/$entry/*")
-          done < .cnb-package-ignore
-          zip -r "${PLUGIN_NAME}.zip" "$PLUGIN_NAME/" "${ZIP_EXCLUDES[@]}"
+          # 构建目录里只有上一步按复制白名单 cp 进来的文件，白名单即发布包内容的唯一来源,
+          # 无需再做排除过滤，直接整目录打包即可（CNB 只做镜像同步，不涉及打包）。
+          zip -r "${PLUGIN_NAME}.zip" "$PLUGIN_NAME/"
 
           echo "== 发布包内容 =="
           unzip -l "${PLUGIN_NAME}.zip"
 
-      # 7.1 校验发布包边界：忽略清单条目不得出现在包内，必需文件不得缺失
+      # 7.1 校验发布包边界：只允许白名单文件，必需文件不得缺失
       - name: 校验发布包边界
         run: |
           PLUGIN_NAME="${{ steps.get_info.outputs.plugin_name }}"
           ARTIFACT="${PLUGIN_NAME}.zip"
-          LIST=$(unzip -l "$ARTIFACT" | awk '{print $4}')
+          # awk 取第 4 列文件名；去掉目录行与表头 / 分隔行，再滤掉空行，
+          # 否则首尾空行会让逐行断言失去意义
+          LIST=$(unzip -l "$ARTIFACT" | awk '{print $4}' | grep -v '/$' \
+            | grep -vE '^(Name|-+)?$' || true)
 
-          while IFS= read -r entry; do
-            case "$entry" in
-              ''|'#'*) continue ;;
-            esac
-            if echo "$LIST" | grep -qx "${PLUGIN_NAME}/$entry" \
-              || echo "$LIST" | grep -q "^${PLUGIN_NAME}/$entry/"; then
-              echo "::error::发布包内混入了应忽略的条目: $entry"
-              exit 1
-            fi
-          done < .cnb-package-ignore
-
+          # 1) 必需文件必须在包内
           for required in main.py __init__.py client.py metadata.yaml requirements.txt _conf_schema.json; do
             echo "$LIST" | grep -qx "${PLUGIN_NAME}/$required" \
               || { echo "::error::发布包缺少必需文件: $required"; exit 1; }
           done
+
+          # 2) 包内只能出现白名单条目：开发 / CI 资产（AGENTS.md、install_gpg_keys.sh、
+          #    ai-audit/、.github/、tests/ 等）一旦混进包，会被铺到使用者的插件目录里，
+          #    其中拉取私钥、改写全局 git 配置的脚本若被误执行，风险由使用者承担。
+          #    白名单须与上面「复制插件文件」步骤保持一致（logo.png 可选）。
+          while IFS= read -r entry; do
+            case "$entry" in
+              "${PLUGIN_NAME}/main.py"|"${PLUGIN_NAME}/__init__.py"| \
+              "${PLUGIN_NAME}/client.py"|"${PLUGIN_NAME}/metadata.yaml"| \
+              "${PLUGIN_NAME}/requirements.txt"|"${PLUGIN_NAME}/_conf_schema.json"| \
+              "${PLUGIN_NAME}/logo.png")
+                continue
+                ;;
+            esac
+            echo "::error::发布包内混入了白名单之外的条目: ${entry}"
+            exit 1
+          done <<< "$LIST"
+
           echo "发布包边界校验通过"
 
       # 8. 生成 Release Notes

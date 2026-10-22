@@ -178,8 +178,7 @@ python -m tests.run_coverage              # 跑单测并生成 coverage.xml
 ├── metadata.yaml         # 插件元数据（版本、分类、标签）
 ├── tests/                # 单测与覆盖率启动器（python -m tests.run_coverage）
 ├── ai-audit/             # AI 审计相关资产（不计入覆盖率分母）
-├── SECURITY.md           # 安全策略：支持范围、漏洞报告渠道与安全实践
-└── .cnb-package-ignore   # 发布包（zip）忽略清单：插件装进宿主时用不到的文件
+└── SECURITY.md           # 安全策略：支持范围、漏洞报告渠道与安全实践
 ```
 
 ### 两个容易踩的坑
@@ -208,9 +207,8 @@ pydocstyle 等钩子，详见 [`.pre-commit-config.yaml`](.pre-commit-config.yam
 - **安全策略**：支持范围、漏洞报告渠道与安全实践见 [`SECURITY.md`](SECURITY.md)
 - **镜像同步**：CNB（`.cnb.yml`）在 `main` 推送时同步到 GitHub 镜像仓库，并以 CNB 侧为准；
   CNB 不构建插件包，打包只发生在 GitHub 侧
-- **发布包**：由 GitHub Release 先按复制白名单把运行必需文件放进构建目录，
-  再按排除清单（[`.cnb-package-ignore`](.cnb-package-ignore)）过滤并断言，
-  只装插件运行所需文件
+- **发布包**：由 GitHub Release 按复制白名单把运行必需文件放进构建目录并打包，
+  白名单是包内容的唯一来源，产物只含插件运行所需文件
 
 ### 发布包里装什么
 
@@ -225,11 +223,12 @@ astrbot_plugin_ots_memory/
 
 `AGENTS.md`、`install_gpg_keys.sh`、`ai-audit/`、`.github/`、`tests/` 等开发 / CI 资产
 一律不进包——它们不会被宿主加载，但会被装进使用者的插件目录；其中拉取私钥、
-改写全局 git 配置的脚本一旦被下游误执行，风险由使用者承担。取舍标准与增删方式
-打包分两步：`release.yml` 先按**复制白名单**把上面这些文件复制进构建目录（构建目录里
-只有白名单内容），再按 [`.cnb-package-ignore`](.cnb-package-ignore) 过滤并逐条断言清单条目
-确实不在包里，断言失败即中断。因此新增**随插件发布**的文件要改复制白名单；开发 / CI 资产
-本就不会被复制，列进清单是兜底断言。取舍标准见该文件头注释。
+改写全局 git 配置的脚本一旦被下游误执行，风险由使用者承担。
+
+边界由**一处**定义：[`release.yml`](.github/workflows/release.yml) 的**复制白名单**。
+它先把上面列出的文件复制进空的构建目录，再整目录打包——开发 / CI 资产压根不会被复制，
+天然不在包里。打包后还有一道断言：包内只允许出现白名单文件，混入其它条目即中断。
+因此新增**随插件发布**的文件，只需改 `release.yml` 的复制白名单。
 
 ## 常见问题
 
