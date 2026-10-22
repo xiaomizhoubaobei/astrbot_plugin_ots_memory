@@ -103,9 +103,12 @@ pre-commit run --all-files    # 首次会联网安装各 hook 环境，稍慢
 `mypy`（`--ignore-missing-imports`）、`pydocstyle`（`--convention=google`），以及
 文件卫生类钩子（EOF / 行尾空白 / 大文件 / 私钥检测 / 合并冲突标记等）。
 
-关于 `black` 的 Python 版本：**不要**给它固定 `language_version`——它用官方镜像自带的
-独立解释器，只要求本机有任意受支持的 Python（3.9+）；写死小版本会让「只装了 3.13」的
-环境找不到 `python3.12` 而失败。代码目标版本由 `--target-version py312` 决定。
+关于 `black` 的 Python 版本：**不要**给它固定 `language_version`。`language_version` 未设置时，
+pre-commit 用**当前运行 `pre-commit` 的那个系统 Python** 创建隔离的 hook 环境，`black` 跑在
+这个解释器里，而不是某个自带独立解释器的镜像。所以只要求本机装好并处于 `PATH` 的 Python 受支持
+（3.9+）即可；写死小版本反而会让「只装了 3.13」的环境找不到 `python3.12` 而失败。
+代码目标版本由 `--target-version py312` 决定——它说的是「按 3.12 的语法/风格改写」，与钩子
+用哪个解释器执行是两件事。
 
 除此之外，几条本仓库的具体要求：
 
@@ -201,7 +204,8 @@ bash install_gpg_keys.sh
 - [ ] 提交信息为中文、Angular 格式，且**已签名**
 - [ ] 无涉密信息：AK / SK / Token / 用户真实记忆数据均未出现在代码、日志、测试与截图里
 - [ ] 改了行为就同步改了文档（README / 本文件 / `AGENTS.md` 相应章节）
-- [ ] 新增「宿主不会读取的文件」时，已加入 `.cnb-package-ignore`（见下）
+- [ ] 新增**随插件发布**的文件时，已加入 `release.yml` 的复制白名单；
+      新增「宿主不会读取」的顶层条目时，已加入 `.cnb-package-ignore` 兜底断言（见下）
 - [ ] 若 `.cnb.yml` 的 GitHub 同步仍生效，已同步创建镜像侧 PR
 
 代码审查：所有 PR 都需审查，请积极响应意见；讨论对事不对人，有依据的反对意见同样受欢迎。
@@ -225,14 +229,23 @@ metadata.yaml  requirements.txt  _conf_schema.json
 logo.png（可选）
 ```
 
-`.cnb-package-ignore` 是**发布包边界的唯一来源**，GitHub Release 打包时按它过滤，
-并逐条断言这些条目确实不在包里（断言失败即中断）。`AGENTS.md`、本文件、`CODE_OF_CONDUCT.md`、
-`SECURITY.md`、`install_gpg_keys.sh`、`ai-audit/`、`.github/`、`tests/` 等开发 / CI 资产
-一律不进包——它们不会被宿主加载，却会被装进使用者的插件目录；其中拉私钥、改全局 git 配置的
-脚本一旦被下游误执行，风险不该这样传递。
+打包是**两步**，顺序别记反：
 
-> 因此：**新增一个「宿主不会读取」的顶层文件或目录时，记得把它写进 `.cnb-package-ignore`**，
-> 否则它会悄悄跑进发布包。
+1. `release.yml` 先按**复制白名单**把上面这几个文件 `cp` 进构建目录——构建目录里**只有**白名单
+   里的东西，这是「放进来的边界」；
+2. 再按 `.cnb-package-ignore` 对构建目录做过滤，并逐条断言清单条目确实不在 zip 里（断言失败即中断）。
+
+所以 `.cnb-package-ignore` 是**排除 / 断言清单**，不是「包含边界的唯一来源」：它筛的是已经被
+白名单复制进来的构建目录，本身不决定什么能进包。`AGENTS.md`、本文件、`CODE_OF_CONDUCT.md`、
+`SECURITY.md`、`install_gpg_keys.sh`、`ai-audit/`、`.github/`、`tests/` 这些开发 / CI 资产压根
+不会被复制进构建目录，因此它们**天然不在包里**，列进清单只是多一道显式断言，防止日后有人往
+白名单里加东西时顺手把风险资产带出去——它们不会被宿主加载，却会随包落进使用者的插件目录，
+其中拉私钥、改全局 git 配置的脚本一旦被下游误执行，风险不该这样传递。
+
+> 因此两条口径要分清：
+> - **新增需要随插件发布的文件**（宿主会读取）→ 改 `release.yml` 的**复制白名单**，否则它不会进包；
+> - **新增仅供开发 / CI、宿主不读取的顶层文件**→ 该文件不会被复制进包；若担心它与白名单重名、
+>   或被将来的白名单变更带进来，再把它写进 `.cnb-package-ignore` 加一道断言。
 
 ## 安全问题
 

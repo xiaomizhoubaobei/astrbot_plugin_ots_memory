@@ -154,9 +154,10 @@ Release Notes / 安全公告中致谢（如你愿意署名）。
 
 ### 发布包的边界
 
-插件发布包由 GitHub Release 按 [`.cnb-package-ignore`](.cnb-package-ignore) 打包，
-**只装 AstrBot 加载插件真正会读的文件**（`main.py` / `client.py` / `__init__.py` /
-`metadata.yaml` / `requirements.txt` / `_conf_schema.json`，可选 `logo.png`）。
+插件发布包由 GitHub Release 打包：先按复制白名单把
+**AstrBot 加载插件真正会读的文件**（`main.py` / `client.py` / `__init__.py` /
+`metadata.yaml` / `requirements.txt` / `_conf_schema.json`，可选 `logo.png`）复制进构建目录，
+再按 [`.cnb-package-ignore`](.cnb-package-ignore) 过滤并逐条断言。
 
 `AGENTS.md`、`install_gpg_keys.sh`、`ai-audit/`、`.github/`、`tests/`、`SECURITY.md` 等
 开发 / CI 资产**一律不进包**——它们不会被宿主加载，却会被铺进使用者的插件目录；

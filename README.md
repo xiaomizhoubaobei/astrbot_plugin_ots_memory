@@ -208,7 +208,8 @@ pydocstyle 等钩子，详见 [`.pre-commit-config.yaml`](.pre-commit-config.yam
 - **安全策略**：支持范围、漏洞报告渠道与安全实践见 [`SECURITY.md`](SECURITY.md)
 - **镜像同步**：CNB（`.cnb.yml`）在 `main` 推送时同步到 GitHub 镜像仓库，并以 CNB 侧为准；
   CNB 不构建插件包，打包只发生在 GitHub 侧
-- **发布包**：由 GitHub Release 按排除清单（[`.cnb-package-ignore`](.cnb-package-ignore)）打包，
+- **发布包**：由 GitHub Release 先按复制白名单把运行必需文件放进构建目录，
+  再按排除清单（[`.cnb-package-ignore`](.cnb-package-ignore)）过滤并断言，
   只装插件运行所需文件
 
 ### 发布包里装什么
@@ -225,8 +226,10 @@ astrbot_plugin_ots_memory/
 `AGENTS.md`、`install_gpg_keys.sh`、`ai-audit/`、`.github/`、`tests/` 等开发 / CI 资产
 一律不进包——它们不会被宿主加载，但会被装进使用者的插件目录；其中拉取私钥、
 改写全局 git 配置的脚本一旦被下游误执行，风险由使用者承担。取舍标准与增删方式
-见 [`.cnb-package-ignore`](.cnb-package-ignore) 头注释；`release.yml` 的打包作业会逐条
-断言这些条目确实不在包里，断言失败即中断，避免清单与产物悄悄漂移。
+打包分两步：`release.yml` 先按**复制白名单**把上面这些文件复制进构建目录（构建目录里
+只有白名单内容），再按 [`.cnb-package-ignore`](.cnb-package-ignore) 过滤并逐条断言清单条目
+确实不在包里，断言失败即中断。因此新增**随插件发布**的文件要改复制白名单；开发 / CI 资产
+本就不会被复制，列进清单是兜底断言。取舍标准见该文件头注释。
 
 ## 常见问题
 
