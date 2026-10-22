@@ -13,6 +13,7 @@
 # 下游误执行，风险由使用者承担——责任边界不该这样传递。
 AGENTS.md
 CODE_OF_CONDUCT.md
+CONTRIBUTING.md
 SECURITY.md
 LICENSE
 install_gpg_keys.sh

@@ -239,6 +239,8 @@ astrbot_plugin_ots_memory/
 
 ## 参与贡献
 
+- **贡献指南**：动手前先读 [`CONTRIBUTING.md`](CONTRIBUTING.md)——开发环境、代码规范、
+  测试与覆盖率、中文提交信息 + GPG 签名、PR 流程与发布包边界，都在那一份里。
 - **行为准则**：请先阅读 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)。它不只讲「别骂人」，
   还写明了本项目的专项约定——涉密信息不入库、AI 辅助的边界、记忆数据伦理、漏洞私下披露。
 - **提交规范**：中文提交信息、Angular 格式、签名提交、先跑 `pre-commit`；一律走 PR，不直推 `main`。
