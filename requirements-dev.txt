@@ -12,6 +12,6 @@
 # 与「插件跑在源码宿主上」的真实运行形态一致，也避免 PyPI 版与上游代码漂移。
 # 因此本清单**不再**声明 astrbot 依赖（Dependabot 不跟踪 git 源，强行写只会失效）。
 
-pytest>=8.4.0
+pytest>=9.1.1
 pytest-asyncio>=1.4.0
 coverage>=7.0
