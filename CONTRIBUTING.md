@@ -106,7 +106,8 @@ pre-commit run --all-files    # 首次会联网安装各 hook 环境，稍慢
 关于 `black` 的 Python 版本：**不要**给它固定 `language_version`。`language_version` 未设置时，
 pre-commit 用**当前运行 `pre-commit` 的那个系统 Python** 创建隔离的 hook 环境，`black` 跑在
 这个解释器里，而不是某个自带独立解释器的镜像。所以只要求本机装好并处于 `PATH` 的 Python 受支持
-（3.9+）即可；写死小版本反而会让「只装了 3.13」的环境找不到 `python3.12` 而失败。
+（3.10+，因为 `black` 26.10.1 的 `requires-python` 就是 `>=3.10`）即可；写死小版本反而会让
+「只装了 3.13」的环境找不到 `python3.12` 而失败。
 代码目标版本由 `--target-version py312` 决定——它说的是「按 3.12 的语法/风格改写」，与钩子
 用哪个解释器执行是两件事。
 

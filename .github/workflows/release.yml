@@ -103,8 +103,8 @@ jobs:
         run: |
           PLUGIN_NAME="${{ steps.get_info.outputs.plugin_name }}"
 
-          # 按 .cnb-package-ignore 过滤：清单是发布包边界的唯一来源（头注释有取舍标准），
-          # 与 CNB 打包作业共用同一份清单，避免两边口径漂移。
+          # 按 .cnb-package-ignore 过滤：本清单的唯一读取方就是这里（头注释有取舍标准）。
+          # CNB 不打包插件包（.cnb.yml 只把代码同步到 GitHub 镜像仓库），不存在第二处读取方。
           # 构建目录里只有上一步复制进来的文件，故直接用 zip -x 过滤即可。
           ZIP_EXCLUDES=()
           while IFS= read -r entry; do
