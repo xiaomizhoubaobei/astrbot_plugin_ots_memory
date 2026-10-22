@@ -65,9 +65,9 @@ $:
                     - python -c "import astrbot; print('astrbot 导入成功:', astrbot.__file__)"
 
 main:
-      # 注意：本仓库已移除 CNB 侧的覆盖率上报（原「覆盖率测试 + testing:coverage」作业）。
-      # 单元测试覆盖率现统一由 GitHub 侧 .github/workflows/coverage.yml 产出并上报 Codecov，
-      # 徽章见 README 顶部。CNB 侧仅保留「同步到 GitHub」作业。
+      # 注意：CNB 侧只干一件事——把代码同步到 GitHub 镜像仓库。
+      # 单测覆盖率、Release 与插件 zip 打包统一由 GitHub Actions 产出
+      # （.github/workflows/coverage.yml、release.yml），CNB 不再重复构建 zip。
       push:
         - services:
             - docker
@@ -86,68 +86,3 @@ main:
                 force: true
                 git_user: ${GIT_USERNAME}
                 git_email: ${GIT_EMAIL}
-
-      # --- 发布包（zip）打包：只装插件运行所需文件 ---
-      # 发布包边界见 .cnb-package-ignore（与 GitHub Actions release.yml 共用同一份忽略清单），
-      # 个人工程化资产（AGENTS.md / install_gpg_keys.sh / ai-audit / .github 等）
-      # 不会被 AstrBot 加载，也不该随插件装进使用者目录。
-        - imports:
-            - https://cnb.cool/XMZZUZHI/key/-/blob/main/Package.yml
-          stages:
-            - name: 打包插件 zip
-              script: |
-                set -euo pipefail
-                VERSION=$(grep '^version:' metadata.yaml | awk '{print $2}')
-                VERSION=${VERSION#v}
-                PLUGIN_NAME=$(grep '^name:' metadata.yaml | awk '{print $2}')
-                PKG_DIR=".pkg/${PLUGIN_NAME}"
-                ARTIFACT="${PLUGIN_NAME}-v${VERSION}.zip"
-
-                rm -rf .pkg "${ARTIFACT}"
-                mkdir -p "${PKG_DIR}"
-
-                # 运行必需文件：缺失即失败，避免产出残缺包却发布成功
-                cp main.py __init__.py client.py metadata.yaml requirements.txt _conf_schema.json "${PKG_DIR}/"
-                # logo 可选，缺失不影响插件运行
-                cp logo.png "${PKG_DIR}/" 2>/dev/null || true
-
-                # 按 .cnb-package-ignore 过滤：清单是发布包边界的唯一来源（头注释有取舍标准）。
-                # 打包目录里只有上面复制进来的文件，故直接用 zip -x 过滤即可，
-                # 且 -x 只作用于被加入的路径，不会误伤同名文件。
-                ZIP_EXCLUDES=()
-                while IFS= read -r entry; do
-                  case "${entry}" in
-                    ''|'#'*) continue ;;
-                  esac
-                  ZIP_EXCLUDES+=(-x "${PLUGIN_NAME}/${entry}" "${PLUGIN_NAME}/${entry}/*")
-                done < .cnb-package-ignore
-                (cd .pkg && zip -r "../${ARTIFACT}" "${PLUGIN_NAME}/" "${ZIP_EXCLUDES[@]}")
-
-                echo "== 发布包内容 =="
-                unzip -l "${ARTIFACT}"
-                echo "✅ 打包完成: ${ARTIFACT} ($(du -h "${ARTIFACT}" | cut -f1))"
-                printf '%s' "${ARTIFACT}" > .pkg-artifact-name
-            - name: 校验发布包边界
-              script: |
-                set -euo pipefail
-                PLUGIN_NAME=$(grep '^name:' metadata.yaml | awk '{print $2}')
-                ARTIFACT=$(cat .pkg-artifact-name)
-
-                # 逐个断言忽略清单里的条目都不在包内，避免"改了清单忘了同步"静默漏包
-                while IFS= read -r entry; do
-                  case "${entry}" in
-                    ''|'#'*) continue ;;
-                  esac
-                  if unzip -l "${ARTIFACT}" | awk '{print $4}' | grep -qx "${PLUGIN_NAME}/${entry}" \
-                    || unzip -l "${ARTIFACT}" | awk '{print $4}' | grep -q "^${PLUGIN_NAME}/${entry}/"; then
-                    echo "❌ 发布包内混入了应忽略的条目: ${entry}"
-                    exit 1
-                  fi
-                done < .cnb-package-ignore
-
-                # 运行必需文件必须在包内
-                for required in main.py __init__.py client.py metadata.yaml requirements.txt _conf_schema.json; do
-                  unzip -l "${ARTIFACT}" | awk '{print $4}' | grep -qx "${PLUGIN_NAME}/${required}" \
-                    || { echo "❌ 发布包缺少必需文件: ${required}"; exit 1; }
-                done
-                echo "✅ 发布包边界校验通过"
