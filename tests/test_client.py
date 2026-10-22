@@ -503,5 +503,3 @@ async def test_error_log_omits_body_and_truncates_request_id(
     assert "sensitive-echo" not in logged
     # 异常文本同样不得夹带响应体（它会被上层日志与工具返回值透出）
     assert "sensitive-echo" not in str(exc_info.value)
-    # 响应体仍完整保留在异常里，交由调用方决定如何处置
-    assert "sensitive-echo" not in str(exc_info.value)

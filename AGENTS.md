@@ -146,7 +146,7 @@ bash install_gpg_keys.sh
 
 ### 5.1 上游接口调用（阿里云 Tablestore Memory Store）
 - **签名与请求**：`client.py` 内自研 OTS V4 签名（HMAC-SHA256 + Canonical Request），禁止为了「省事」引入庞大 SDK 或把签名逻辑改写为非标准实现。
-- **错误转换**：上游非 2xx 一律在上层转换为中文 `RuntimeError`（`OTS API Error [<status>]: <body>`），由工具层捕获后返回可读提示，禁止把原始堆栈直接抛给用户。
+- **错误转换**：上游非 2xx 一律在上层转换为中文 `RuntimeError`（`OTS 接口错误 [status=<status>] request_id=<request_id|\<none\>]`），**异常文本只承载 `status` 与截断后的 `x-ots-requestid`（≤64 字符）**，严禁夹带上游响应体；由工具层捕获后返回**固定中文提示**（`检索记忆失败，请稍后重试。` / `保存记忆失败，请稍后重试。`），禁止把原始堆栈或异常文本回显给用户。
 - **日志脱敏**：上游错误日志只记录 `status` 与截断后的 `x-ots-requestid`（≤64 字符），**禁止**把响应体整段落盘——错误体可能极大或回显用户记忆内容。
 - **失败降级**：任何异步沉淀（`auto_record`）异常只记录 `warning`，不得逃逸到对话链；配置不全时插件**禁用自身而非崩溃**。
 
