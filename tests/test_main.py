@@ -168,6 +168,26 @@ async def test_save_memory_error_is_wrapped() -> None:
     assert "保存记忆失败" in _text(result)
 
 
+async def test_tool_result_does_not_echo_exception_text(monkeypatch) -> None:
+    """工具返回值只给固定提示，不得回显异常文本（可能夹带上游响应体）."""
+    from astrbot_plugin_ots_memory import main as main_mod
+
+    leaky = RuntimeError("OTS 接口错误 [status=400] 用户记忆原文")
+
+    monkeypatch.setattr(main_mod.logger, "error", lambda *a, **k: None)
+    monkeypatch.setattr(main_mod.logger, "warning", lambda *a, **k: None)
+
+    recall = await RecallMemoryTool(plugin=_FakePlugin(_FakeClient(error=leaky))).call(
+        None, query="x"
+    )
+    assert "用户记忆原文" not in _text(recall)
+
+    save = await SaveMemoryTool(plugin=_FakePlugin(_FakeClient(error=leaky))).call(
+        None, fact="x"
+    )
+    assert "用户记忆原文" not in _text(save)
+
+
 # ── 插件本体：构造、Tool 注册与自动沉淀（不阻塞后台任务） ────────────────────
 #
 # 说明：此前的用例只覆盖 Tool 的 call 分支，插件本体（__init__ 与

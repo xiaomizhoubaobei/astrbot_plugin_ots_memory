@@ -99,7 +99,12 @@ class OTSMemoryClient:
         url = f"{self.endpoint}/{api_name}"
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, data=body_bytes) as resp:
+            # 出站边界：显式关闭重定向跟随。否则上游（或中间人）一旦返回 3xx，
+            # aiohttp 会把请求带向**配置 endpoint 之外**的主机；禁用后 3xx 直接
+            # 落进下方的非 2xx 分支，出站目标始终只有配置的接入点这一个。
+            async with session.post(
+                url, headers=headers, data=body_bytes, allow_redirects=False
+            ) as resp:
                 text = await resp.text()
                 if resp.status >= 300:
                     # 请求 ID 用于向上游排障，截断到固定长度，避免异常响应无限膨胀日志
@@ -107,13 +112,16 @@ class OTSMemoryClient:
                         "x-ots-requestid", ""
                     )
                     request_id = str(raw_request_id)[:64]
-                    # 仅记录状态与请求 ID：上游错误体可能极大或回显用户数据，
-                    # 且同一份内容已随 RuntimeError 抛给调用方留档，此处不重复落盘
                     logger.error(
                         f"[ots_memory] {api_name} 调用失败: "
                         f"status={resp.status} request_id={request_id or '<none>'}"
                     )
-                    raise RuntimeError(f"OTS API Error [{resp.status}]: {text}")
+                    # 异常里同样只带状态与请求 ID：响应体会回显用户记忆内容，
+                    # 且异常文本会被上层日志与工具返回值透出，一旦夹带即等同泄露。
+                    raise RuntimeError(
+                        f"OTS 接口错误 [status={resp.status}] "
+                        f"request_id={request_id or '<none>'}"
+                    )
                 return json.loads(text)
 
     async def search_memories(

@@ -232,8 +232,15 @@ class _FakeSession:
     def __init__(self, *args: object, **kwargs: object) -> None:
         pass
 
-    def post(self, url: str, headers: dict, data: bytes) -> _FakeResponse:
-        _FakeSession.captured = {"url": url, "headers": headers, "data": data}
+    def post(
+        self, url: str, headers: dict, data: bytes, **kwargs: object
+    ) -> _FakeResponse:
+        _FakeSession.captured = {
+            "url": url,
+            "headers": headers,
+            "data": data,
+            "kwargs": kwargs,
+        }
         return _FakeResponse(_FakeSession.response_payload)
 
     response_payload: dict = {}
@@ -277,6 +284,56 @@ async def test_search_memories_builds_expected_payload(fake_aiohttp) -> None:
     assert sent["topK"] == 3
     assert sent["thresholds"] == {"minScore": 0.5}
     assert fake_aiohttp.captured["url"].endswith("/SearchMemories")
+
+
+@pytest.mark.asyncio
+async def test_request_disables_redirects(fake_aiohttp) -> None:
+    """出站必须显式关闭重定向跟随，避免被带往 endpoint 之外的主机.
+
+    跟随重定向意味着「配置里的 endpoint」不再是唯一出站目标：上游（或被劫持的
+    中间节点）返回 3xx 就能把带签名的请求导向任意主机。故锁死 ``allow_redirects=False``。
+    """
+    fake_aiohttp.response_payload = {"results": []}
+    client = _make_client()
+    await client.search_memories(store_name="s", app_id="a", tenant_id="t", query="q")
+    assert fake_aiohttp.captured["kwargs"].get("allow_redirects") is False
+
+
+@pytest.mark.asyncio
+async def test_error_does_not_echo_upstream_body(fake_aiohttp, monkeypatch) -> None:
+    """异常文本只含状态与请求 ID，不得夹带上游响应体.
+
+    异常文本会经上层日志与工具返回值透出，一旦包含响应体即等同泄露用户记忆内容。
+    """
+    from astrbot_plugin_ots_memory import client as client_mod
+
+    leak = "user-memory-echo"
+
+    class _ErrResponse(_FakeResponse):
+        def __init__(self) -> None:
+            super().__init__({}, status=400)
+            self.headers = {"x-ots-requestid": "rid-123"}
+
+        async def text(self) -> str:
+            return leak
+
+    class _ErrSession(_FakeSession):
+        def post(
+            self, url: str, headers: dict, data: bytes, **kwargs: object
+        ) -> _ErrResponse:
+            return _ErrResponse()
+
+    monkeypatch.setattr(client_mod.aiohttp, "ClientSession", _ErrSession)
+    client = _make_client()
+    with pytest.raises(RuntimeError) as exc_info:
+        await client.search_memories(
+            store_name="s", app_id="a", tenant_id="t", query="q"
+        )
+
+    message = str(exc_info.value)
+    assert "400" in message
+    assert "rid-123" in message
+    assert leak not in message
 
 
 @pytest.mark.asyncio
@@ -342,12 +399,14 @@ async def test_error_status_raises_runtime_error(fake_aiohttp) -> None:
             return "boom"
 
     class _ErrSession(_FakeSession):
-        def post(self, url: str, headers: dict, data: bytes) -> _ErrResponse:
+        def post(
+            self, url: str, headers: dict, data: bytes, **kwargs: object
+        ) -> _ErrResponse:
             return _ErrResponse()
 
     client_mod.aiohttp.ClientSession = _ErrSession
     client = _make_client()
-    with pytest.raises(RuntimeError, match="OTS API Error"):
+    with pytest.raises(RuntimeError, match="OTS 接口错误"):
         await client.search_memories(
             store_name="s", app_id="a", tenant_id="t", query="q"
         )
@@ -379,7 +438,9 @@ async def test_error_status_logs_via_astrbot_logger(fake_aiohttp, monkeypatch) -
             return "unavailable"
 
     class _ErrSession(_FakeSession):
-        def post(self, url: str, headers: dict, data: bytes) -> _ErrResponse:
+        def post(
+            self, url: str, headers: dict, data: bytes, **kwargs: object
+        ) -> _ErrResponse:
             return _ErrResponse()
 
     calls: list[str] = []
@@ -418,7 +479,9 @@ async def test_error_log_omits_body_and_truncates_request_id(
             return huge_body
 
     class _ErrSession(_FakeSession):
-        def post(self, url: str, headers: dict, data: bytes) -> _ErrResponse:
+        def post(
+            self, url: str, headers: dict, data: bytes, **kwargs: object
+        ) -> _ErrResponse:
             return _ErrResponse()
 
     calls: list[str] = []
@@ -438,5 +501,7 @@ async def test_error_log_omits_body_and_truncates_request_id(
     # 请求 ID 截断到 64 字符，响应体一律不进日志
     assert "R" * 65 not in logged
     assert "sensitive-echo" not in logged
+    # 异常文本同样不得夹带响应体（它会被上层日志与工具返回值透出）
+    assert "sensitive-echo" not in str(exc_info.value)
     # 响应体仍完整保留在异常里，交由调用方决定如何处置
-    assert "sensitive-echo" in str(exc_info.value)
+    assert "sensitive-echo" not in str(exc_info.value)

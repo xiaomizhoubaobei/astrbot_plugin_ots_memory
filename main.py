@@ -28,6 +28,17 @@ def _segment_texts(segments: Any) -> list[str]:
     return texts
 
 
+def _safe_error_text(exc: BaseException, limit: int = 200) -> str:
+    """把异常文本压成可安全落日志的摘要.
+
+    ``OTSMemoryClient`` 抛出的 ``RuntimeError`` 已只含状态与请求 ID，但其它异常
+    （如 ``json`` 解析错误）可能携带上游响应片段。此处统一截断，避免异常里的
+    响应体被完整铺进日志。
+    """
+    text = str(exc).strip().replace("\n", " ")
+    return text[:limit] if text else "<无描述>"
+
+
 def _tool_result(text: str, *, is_error: bool = False) -> ToolExecResult:
     """构造工具执行结果.
 
@@ -103,8 +114,13 @@ class RecallMemoryTool(FunctionTool[AstrAgentContext]):
 
             return _tool_result("\n".join(lines))
         except Exception as e:
-            logger.error(f"[ots_memory] recall_memory 失败: {e}")
-            return _tool_result(f"检索记忆失败: {e}", is_error=True)
+            # 只记异常类型与文本摘要：上游错误体可能回显用户记忆内容，
+            # 原始异常文本不得进日志，更不得回吐给模型 / 终端用户。
+            logger.error(
+                f"[ots_memory] recall_memory 失败: {type(e).__name__}: "
+                f"{_safe_error_text(e)}"
+            )
+            return _tool_result("检索记忆失败，请稍后重试。", is_error=True)
 
 
 @dataclass
@@ -157,8 +173,11 @@ class SaveMemoryTool(FunctionTool[AstrAgentContext]):
             )
             return _tool_result(f"已保存记忆：{fact}")
         except Exception as e:
-            logger.error(f"[ots_memory] save_memory 失败: {e}")
-            return _tool_result(f"保存记忆失败: {e}", is_error=True)
+            logger.error(
+                f"[ots_memory] save_memory 失败: {type(e).__name__}: "
+                f"{_safe_error_text(e)}"
+            )
+            return _tool_result("保存记忆失败，请稍后重试。", is_error=True)
 
 
 class OTSMemoryPlugin(Star):
@@ -238,6 +257,9 @@ class OTSMemoryPlugin(Star):
                 )
                 logger.debug(f"[ots_memory] 自动沉淀记忆成功，共 {len(messages)} 条")
             except Exception as e:
-                logger.warning(f"[ots_memory] 自动沉淀记忆失败: {e}")
+                logger.warning(
+                    f"[ots_memory] 自动沉淀记忆失败: {type(e).__name__}: "
+                    f"{_safe_error_text(e)}"
+                )
 
         asyncio.create_task(_background_save())
