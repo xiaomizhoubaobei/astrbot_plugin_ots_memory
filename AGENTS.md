@@ -79,6 +79,91 @@ bash install_gpg_keys.sh
 - 脚本执行失败时，**如实汇报**所见的报错行、`curl` 退出码、已执行步骤及结果，交由用户/人工判断。
 - 若为变量未注入（脚本报 `未设置私钥解锁短语`）或分发 API 不可达，真实出路是修密钥仓库（如 `key/npc.yml`）的变量注入或排查网络链路，**禁止**在业务代码里打补丁掩盖。
 
+
+#### 1.5.4 漏跑 / 跑失败时的兜底（禁止产出 unsigned 提交）
+
+脚本跑通只保证「这台机器能签」，**不保证「这一条真签了」**。已发生过一次真实事故：分支前三条提交 verified，第四条完全没有签名块，GitHub 判 `reason: unsigned`（不是 `unknown_key`）。成因是「脚本没跑就提交」「跑了但某个环节被绕过」或「push 阶段重新生成提交」三类，必须在提交与推送两个关口各自拦住。
+
+**一、为什么会出现 unsigned（三个真实成因）**
+
+| 成因 | 现象 | 本质 |
+| --- | --- | --- |
+| 漏跑脚本直接提交 | 本地 `git log --format='%G?'` 为 `N` | 签名环境从未接管 |
+| 脚本跑了但签名器被绕过 | 同上，但 `gpg --list-secret-keys` 有私钥 | 仓库级 `gpg.program` / `commit.gpgsign` 被旧配置覆盖 |
+| 提交被重写而未重签 | 单条 `N`，同分支其余 `G` | `amend` / `rebase` / 平台侧重新生成提交时没带 `-S` |
+
+**最容易漏的一条**：`git commit -S` 里的 `-S` 走的是 `gpg.program`，**不读** `commit.gpgsign`。若仓库级 `gpg.program` 仍是旧的 `cnb-gpgsign`（或不存在的路径），`-S` 会直接失败，此时若用了 `git commit --no-verify` / `|| true` 之类似是而非的兜底，就会静默产出 unsigned 提交。
+
+签前一条命令自检签名器是否真能出签名（不产生任何提交）：
+
+```bash
+git config --get gpg.program    # 空 = 走系统 gpg；指向 cnb-gpgsign 等外部签名器时尤其要验
+printf 'probe\n' | gpg --batch --no-tty --pinentry-mode loopback \
+  --passphrase "${PLUGIN_GPG_KEY:-$GPG_KEY}" -u "$(git config --get user.signingkey)" --detach-sign -o /tmp/probe.sig \
+  && echo "签名器可用"
+```
+
+- 上面能出 `/tmp/probe.sig`，说明 `user.signingkey` + passphrase 链路可用；出不来就别提交，先回 1.5.1 重跑脚本。
+- `gpg.program` 被写成 `/workspace/install_gpg_keys.sh`（把安装脚本误当签名器）时会直接失败——这是实测踩到的坑：`-S` 报错但若外层用了 `|| true`，就会静默落成 unsigned 提交。
+
+**二、提交关：每次 commit 后立刻验签（不接受「应该签上了」）**
+
+```bash
+# 唯一判据：本条提交的 %G? 必须是 G（或 U），N = 未签名，E = 本机缺公钥无法判定
+test "$(git log -1 --format='%G?')" = G || { echo "❌ 本条提交未签名，禁止继续"; exit 1; }
+```
+
+- `%G?` 取值口径：`G` 有效签名 / `U` 有效但信任未知 / `N` **无签名** / `E` 无法校验 / `B` 签名损坏。**只认 `G` / `U`，`N` 一律拦下**。
+- `E` 的属性是「本机缺公钥」，不是「没签」——此时**不准**据此判定通过，应改用 `git log --show-signature` 确认是否有 `using ... key <个人指纹>` 的签名块，或换一台有公钥的机器复核。
+- 该检查**对 docs / chore 等非代码提交同样强制**，不因改动「只是文档」而豁免。
+
+**三、推送关：push 前对整个待推范围逐条验签**
+
+只验 HEAD 是不够的——历史中间某条可能是 unsigned（典型如 amend 漏签、交互式 rebase 部分重签）。推之前按范围逐条过：
+
+```bash
+RANGE="origin/$(git rev-parse --abbrev-ref HEAD)..HEAD"   # 待推范围
+git log --format='%h %G? %s' "$RANGE" | tee /tmp/sig.txt
+! grep -vE ' [GU] ' /tmp/sig.txt || { echo "❌ 待推范围内存在未签名/无法校验的提交"; exit 1; }
+```
+
+- 首推新分支（远端尚无该分支）时，范围取 `origin/main..HEAD` 或直接对 `git log --format='%G?' -n <本次提交数>` 逐条校验。
+- 任何一条为 `N` → **禁止 push**，先修签名环境再重签，不要用 `--no-verify`、`--force` 之类的方式把问题推给平台。
+
+**四、已经推上去才发现 unsigned：只重签那一条，不要全分支 rebase**
+
+- 单条漏签的修法（保留其余已验证提交的绿标）：
+
+  ```bash
+  git checkout <分支>
+  # 情况 A：泄漏的就是 HEAD —— 直接 amend 重签
+  git commit --amend -S --no-edit
+  # 情况 B：泄漏的是中间某条 —— 交互式 rebase，把该条标 edit 后重签再续跑
+  #   git rebase -i <该条的上一条提交>
+  #   git commit --amend -S --no-edit && git rebase --continue
+  git push --force-with-lease origin <分支>
+  ```
+
+  - 重签后**必须复验**：`git log --format='%h %G? %s' -n <条数>`，目标提交应从 `N` 变为 `G`。实测中本仓 `docs/contributing` 的第四条就是这样从 unsigned 转成 `G`（指纹 `4D0B2BEFBDFA8AB4`）。
+  - 用 `--force-with-lease` 而非 `--force`：避免覆盖别人（或平台同步流程）刚推上去的提交。
+
+- **不要**为了「统一重签」而对全分支 `rebase --root` / `filter-branch`：已被平台判定 verified 的提交重写后要重新校验，得不偿失，且极易在重写中再次漏签。
+- 分支若由 `git-sync` 强推同步到镜像仓库（见 `.cnb.yml`），**只在 CNB 侧重签并推送**，等流水线同步过去即可，不要在 GitHub 侧单独操作，避免两端分叉。
+- 注意 CNB 与 GitHub 上「内容相同但 SHA 不同」的提交是**两条独立提交**：一端签名正常不代表另一端正常，以平台各自的 verified 状态为准。
+
+**五、三道兜底依次收紧（按需启用，不默认加钩子）**
+
+1. **人工判据**（本节二 / 三，最低成本，必须执行）；
+2. **提交前钩子**：在 `.git/hooks/commit-msg` 或 pre-commit 里加一条 `%G?` 校验，机器上漏签直接拦在本地；
+3. **CI 兜底**：在 PR 流水线里对 `base..head` 逐条验签（需要注入公钥），把「已经推上去的 unsigned」变成显式红灯。
+
+> 三者关系：**第 1 条是纪律，第 2、3 条是防呆**。本项目当前只约定第 1 条为强制项；如需固化第 2、3 条，另开 Issue 讨论（涉及钩子分发与 CI 公钥注入，不宜随文档一并落地）。
+
+**六、异常如实上报**
+
+- 确认是 unsigned 后，汇报必须写明：**哪一条提交**（SHA）、**平台判定原文**（如 `reason: unsigned`）、**本地 `%G?`**、以及是否已重签；**不要**把 `unknown_key` 与 `unsigned` 混为一谈——前者是「公钥没登记」，后者是「压根没有签名块」，处置路径完全不同。
+- 排查时**先查公钥列表再下结论**：核对指纹必须在**正确的账号**下查（本仓 GitHub 镜像账号为 `xiaomizhoubaobei`，不是 CNB 登录名），账号查错会得出「公钥没登记」的错误结论。
+
 ## 2. 编码与代码规范 (Coding Standards)
 
 ### 2.1 语言与类型
