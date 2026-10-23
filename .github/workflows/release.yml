@@ -9,9 +9,11 @@ on:
       - '**/*.py'
   workflow_dispatch:  # 允许手动触发（下发给 build 任务的 refs/heads/main 闸门会拒绝非 main 分支）
 
+# 顶层默认最小权限：只用只读能力。真正需要的写能力（contents: write 建 tag/发 Release、
+# id-token: write 供 Sigstore 签名）一律下沉到下方 build job，避免工作流级授予写权限——
+# 否则任一步骤被替换即可拿到发布与签名能力。actions: read 用于读取同仓 Actions 元数据。
 permissions:
   contents: read
-  id-token: write
   actions: read
 
 jobs:
