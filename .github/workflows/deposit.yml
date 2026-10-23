@@ -1,0 +1,492 @@
+name: AstrBot Plugin AntChain Deposit
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - 'V*'
+      - '[0-9]+*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要存证的 tag（如 v0.0.1）'
+        required: true
+        type: string
+
+concurrency:
+  group: deposit-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deposit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      issues: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@4d991eb9b905fa189e4c376166672c3f2f2378f8 # v2.11.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout Plugin Repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Validate Tag on main branch
+        run: |
+          TARGET_REF="${{ inputs.tag || github.ref_name }}"
+          echo "=== 正在校验目标 tag: $TARGET_REF ==="
+
+          # 确保获取了远程 main 分支和全部 tags
+          git fetch origin main:refs/remotes/origin/main --tags --force
+
+          # 校验是否为合法有效的 tag
+          TAG_COMMIT=$(git rev-list -n 1 "refs/tags/$TARGET_REF" 2>/dev/null || true)
+          if [ -z "$TAG_COMMIT" ]; then
+            echo "::error::[$TARGET_REF] 不是一个有效的 git tag！拒绝执行存证。"
+            exit 1
+          fi
+
+          # 校验该 tag 对应的 commit 是否存在于 origin/main 分支的历史树中
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
+            echo "::error::Tag [$TARGET_REF] (commit: $TAG_COMMIT) 不在主分支 main 上！拒绝执行存证。"
+            exit 1
+          fi
+
+          echo "校验通过: Tag [$TARGET_REF] 归属于 main 分支分支树 (Commit: $TAG_COMMIT)"
+
+      # 在任何第三方检出或下载之前，独立计算插件源码确定性摘要与 commit
+      - name: Compute Plugin Digest & Commit
+        id: meta
+        run: |
+          TARGET_REF="${{ inputs.tag || github.ref_name }}"
+          COMMIT=$(git rev-list -n 1 "refs/tags/$TARGET_REF")
+          DIGEST=$(git archive --format=tar "$TARGET_REF" | sha256sum | awk '{print $1}')
+          if [ -z "$DIGEST" ]; then
+            echo "::error::计算 git archive 确定性摘要失败"
+            exit 1
+          fi
+          echo "tag=$TARGET_REF" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
+      # 单文件精准拉取存证脚本与底层通信模块，无需克隆完整仓库
+      - name: Download Deposit Scripts
+        run: |
+          mkdir -p scripts/common
+          COMMIT_SHA="04dbc08bf1e1e8a9b8498a466650ff9225cb8efa"
+          curl -sSL "https://cnb.cool/XMZZUZHI/chain-contracts/-/raw/${COMMIT_SHA}/scripts/contract_astrbot_plugin.py" -o scripts/contract_astrbot_plugin.py
+          curl -sSL "https://cnb.cool/XMZZUZHI/chain-contracts/-/raw/${COMMIT_SHA}/scripts/common/antchain.py" -o scripts/common/antchain.py
+          touch scripts/common/__init__.py
+
+          # 完整性自检校验
+          echo "d7b63e61d188270d9670a1287dfa8bb213c65e97b1a425424005e2493d19efcf  scripts/contract_astrbot_plugin.py" | sha256sum -c -
+          echo "b172c87a8c862ca643be14a52dff3543cb4b720698f18247e46a646cfd197fb5  scripts/common/antchain.py" | sha256sum -c -
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Dependencies
+        run: pip install pycryptodome==3.20.0
+
+      - name: Run Deposit Release via CLI & Extract Receipt Info
+        id: deposit_step
+        env:
+          TARGET_TAG: ${{ steps.meta.outputs.tag }}
+          TARGET_COMMIT: ${{ steps.meta.outputs.commit }}
+          TARGET_DIGEST: ${{ steps.meta.outputs.digest }}
+          ANTCHAIN_ACCESS_ID: ${{ secrets.ANTCHAIN_ACCESS_ID }}
+          ANTCHAIN_BIZID: ${{ secrets.ANTCHAIN_BIZID }}
+          ANTCHAIN_TENANTID: ${{ secrets.ANTCHAIN_TENANTID }}
+          ANTCHAIN_MYKMS_KEY_ID: ${{ secrets.ANTCHAIN_MYKMS_KEY_ID }}
+          ANTCHAIN_ACCOUNT: ${{ secrets.ANTCHAIN_ACCOUNT }}
+          RSA_PRIVATE_KEY: ${{ secrets.RSA_PRIVATE_KEY }}
+          RSA_PRIVATE_KEY_URL: ${{ secrets.RSA_PRIVATE_KEY_URL }}
+          ANTCHAIN_GAS: 2000000
+        run: |
+          mkdir -p /tmp/deposit_work
+          python3 - << 'EOF'
+          import os, sys, json, time, subprocess
+          sys.path.insert(0, "scripts")
+          import contract_astrbot_plugin as cap
+
+          tag = os.environ["TARGET_TAG"]
+          commit = os.environ["TARGET_COMMIT"]
+          digest = os.environ["TARGET_DIGEST"]
+          repo_full = os.environ.get("GITHUB_REPOSITORY", "")
+          repo_name = repo_full.split("/")[-1] if "/" in repo_full else repo_full
+
+          # 插件名读取（优先 metadata.yaml.name，兜底为仓库名）
+          plugin_name = repo_name
+          if os.path.isfile("metadata.yaml"):
+              try:
+                  with open("metadata.yaml", "r", encoding="utf-8") as f:
+                      meta = cap._parse_metadata_yaml(f.read())
+                      if meta.get("name"):
+                          plugin_name = meta["name"]
+              except Exception as e:
+                  print(f"::warning::读取 metadata.yaml 失败: {e}")
+
+          chain_repo = f"{cap.ASTRBOT_GROUP}/{repo_name}"
+
+          from common.antchain import query_transaction, parse_output
+
+          # 校验必要 Secrets（私钥支持 PEM 内容或 URL）
+          has_key = bool(os.environ.get("RSA_PRIVATE_KEY") or os.environ.get("RSA_PRIVATE_KEY_URL"))
+          if not has_key:
+              print("::error::缺少私钥配置，请配置 RSA_PRIVATE_KEY 或 RSA_PRIVATE_KEY_URL")
+              sys.exit(1)
+
+          for key in ["ANTCHAIN_ACCESS_ID", "ANTCHAIN_BIZID", "ANTCHAIN_TENANTID", "ANTCHAIN_MYKMS_KEY_ID", "ANTCHAIN_ACCOUNT"]:
+              if not os.environ.get(key):
+                  print(f"::error::缺少必要 Secret 配置: {key}")
+                  sys.exit(1)
+
+          print(f"=== 发起版本发布存证 ===")
+          print(f"repo: {chain_repo}")
+          print(f"plugin: {plugin_name}")
+          print(f"tag: {tag}")
+          print(f"commit: {commit}")
+          print(f"digest: {digest}")
+
+          # 调用官方 CLI: contract_astrbot_plugin.py deposit-release-publish
+          cmd = [
+              sys.executable, "scripts/contract_astrbot_plugin.py", "deposit-release-publish",
+              "--repo", chain_repo,
+              "--plugin", plugin_name,
+              "--tag", tag,
+              "--commit", commit,
+              "--digest", digest,
+              "--name", "AstrBotPluginDeposit"
+          ]
+          res = subprocess.run(cmd, capture_output=True, text=True)
+          print(res.stdout)
+          if res.returncode != 0:
+              print(res.stderr)
+              print("::error::调用 deposit-release-publish 失败")
+              sys.exit(1)
+
+          tx_hash = None
+          lines = res.stdout.splitlines()
+          for i, line in enumerate(lines):
+              if "版本发布存证交易 hash" in line and i + 1 < len(lines):
+                  tx_hash = lines[i + 1].strip()
+                  break
+          if not tx_hash:
+              for line in lines:
+                  line = line.strip()
+                  if len(line) == 64 and all(c in "0123456789abcdefABCDEF" for c in line):
+                      tx_hash = line
+                      break
+
+          if not tx_hash:
+              print("::error::未能从 CLI 输出中解析交易 hash")
+              sys.exit(1)
+
+          print(f"交易 hash: {tx_hash}，轮询链上回执...")
+
+          receipt_body = "{}"
+          inner = {}
+          success_mined = False
+          raw_response_full = None
+
+          for _ in range(24):
+              time.sleep(3)
+              receipt_resp = query_transaction(tx_hash, "QUERYRECEIPT")
+              raw_response_full = receipt_resp
+              receipt_body = receipt_resp.get("body", "{}")
+              receipt_data = cap._json_maybe(receipt_body)
+              if isinstance(receipt_data, dict):
+                  inner = cap._json_maybe(receipt_data.get("data", receipt_data)) or {}
+                  if isinstance(inner, dict) and (inner.get("blockNumber") or inner.get("block_number")):
+                      success_mined = True
+                      break
+
+          # P2: 链上回执原始数据归档保存
+          with open("/tmp/deposit_work/raw_receipt.json", "w", encoding="utf-8") as f:
+              json.dump(raw_response_full or {}, f, ensure_ascii=False, indent=2)
+
+          if not success_mined:
+              print(f"::error::回执轮询超时(72s)，tx={tx_hash} 可能未入块")
+              sys.exit(1)
+
+          result_code = inner.get("result")
+          if result_code is None:
+              print(f"::error::回执缺失 result 字段: tx={tx_hash}")
+              sys.exit(1)
+          if str(result_code) not in ("0", ""):
+              print(f"::error::链上执行失败 result={result_code}, tx={tx_hash}")
+              sys.exit(1)
+
+          block_number = inner.get("blockNumber") or inner.get("block_number")
+          gas_used = inner.get("gasUsed") or inner.get("gas_used")
+          print(f"上链成功: block={block_number}, gasUsed={gas_used}, result={result_code}")
+
+          parsed = parse_output(receipt_body, cap.DEPOSIT_OUT_TYPES, "EVM")
+          deposit_info = cap._format_deposit_info(parsed) or {}
+          if not deposit_info.get("id"):
+              print("::error::回执 output 解析存证信息失败或 id 为空")
+              sys.exit(1)
+
+          evidence_id = deposit_info["id"]
+          evidence_kind = deposit_info.get("kindText", "版本发布(ReleasePublish)")
+          ret_tag = deposit_info.get("releaseTag", tag)
+          ret_commit = deposit_info.get("commitRef", commit)
+          ret_digest = deposit_info.get("artifactDigest", digest)
+
+          for name, local, onchain in [("digest", digest, ret_digest), ("tag", tag, ret_tag), ("commit", commit, ret_commit)]:
+              if onchain and onchain != local:
+                  print(f"::error::{name} 链上返回值与本地计算不一致: 链上={onchain} 本地={local}")
+                  sys.exit(1)
+
+          try:
+              gas_used_fmt = f"{int(gas_used):,}"
+          except Exception:
+              gas_used_fmt = str(gas_used)
+
+          result_json = {
+              "id": evidence_id,
+              "kind": evidence_kind,
+              "tag": ret_tag,
+              "source": "GitHub 镜像 tag（真源）",
+              "commit": ret_commit,
+              "digest": ret_digest,
+              "tx_hash": tx_hash,
+              "block_number": block_number,
+              "gas_used": gas_used_fmt,
+              "result_code": str(result_code),
+          }
+          with open("/tmp/deposit_work/result.json", "w", encoding="utf-8") as out_f:
+              json.dump(result_json, out_f, ensure_ascii=False, indent=2)
+          EOF
+
+      # P1 / P2 统一归档：包含解析元数据与 AntChain 原始 RPC 回执
+      - name: Upload Deposit Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: deposit-artifacts
+          path: |
+            /tmp/deposit_work/result.json
+            /tmp/deposit_work/raw_receipt.json
+          if-no-files-found: ignore
+
+      - name: Update Release on Deposit Success
+        id: update_release
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync('/tmp/deposit_work/result.json', 'utf8'));
+            const esc = s => String(s ?? '').replace(/[|\n\r]/g, ' ').slice(0, 120);
+
+            const table = [
+              '| 项目 | 值 |',
+              '| :--- | :--- |',
+              `| 存证编号 | #${esc(data.id)} |`,
+              `| 类别 | ${esc(data.kind)} |`,
+              `| 版本号 | \`${esc(data.tag)}\` |`,
+              `| 来源 | ${esc(data.source)} |`,
+              `| commit | \`${esc(data.commit)}\` |`,
+              `| 产物摘要 (SHA256) | \`${esc(data.digest)}\` |`,
+              `| 交易 hash | \`${esc(data.tx_hash)}\` |`,
+              `| 区块高度 | ${esc(data.block_number)} |`,
+              `| gasUsed | ${esc(data.gas_used)} |`,
+              `| 上链结果 | result=${esc(data.result_code)}（成功） |`
+            ].join('\n');
+
+            const appendNote = [
+              '',
+              `### 📜 链上版本存证凭证`,
+              '',
+              table
+            ].join('\n');
+
+            const tag = String(data.tag || '').trim();
+            let release;
+            try {
+              const res = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: tag
+              });
+              release = res.data;
+            } catch (err) {
+              console.log(`未找到 tag ${tag} 对应的 Release，正在自动创建...`);
+              const res = await github.rest.repos.createRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_name: tag,
+                name: `Release ${tag}`,
+                body: appendNote
+              });
+              release = res.data;
+            }
+
+            if (release && release.id) {
+              const existingBody = release.body ? release.body.trim() : '';
+              if (!existingBody.includes(data.tx_hash)) {
+                await github.rest.repos.updateRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: release.id,
+                  body: existingBody ? `${existingBody}\n\n${appendNote}` : appendNote
+                });
+              }
+            }
+
+            return release.html_url;
+          result-encoding: string
+
+      - name: Send DingTalk Card Notification
+        env:
+          DINGTALK_CLIENT_ID: ${{ secrets.DINGTALK_CLIENT_ID }}
+          DINGTALK_CLIENT_SECRET: ${{ secrets.DINGTALK_CLIENT_SECRET }}
+          DINGTALK_OPEN_CONVERSATION_ID: ${{ secrets.DINGTALK_OPEN_CONVERSATION_ID }}
+          DINGTALK_CARD_TEMPLATE_ID: ${{ secrets.DINGTALK_CARD_TEMPLATE_ID }}
+          DINGTALK_WEBHOOK: ${{ secrets.DINGTALK_WEBHOOK }}
+          DINGTALK_SECRET: ${{ secrets.DINGTALK_SECRET }}
+          REPO_NAME: ${{ github.repository }}
+          RELEASE_URL: ${{ steps.update_release.outputs.result }}
+          WORKFLOW_ACTOR: ${{ github.actor }}
+          WORKFLOW_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        run: |
+          python3 - << 'EOF'
+          import os, json, time, hmac, hashlib, base64, urllib.parse, urllib.request, uuid
+
+          with open("/tmp/deposit_work/result.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          repo = os.environ.get('REPO_NAME', '')
+          release_url = os.environ.get('RELEASE_URL', '')
+          app_key = os.environ.get('DINGTALK_CLIENT_ID', '').strip()
+          app_secret = os.environ.get('DINGTALK_CLIENT_SECRET', '').strip()
+          chat_id = os.environ.get('DINGTALK_OPEN_CONVERSATION_ID', '').strip()
+          card_template_id = os.environ.get('DINGTALK_CARD_TEMPLATE_ID', '').strip()
+          webhook = os.environ.get('DINGTALK_WEBHOOK', '').strip()
+          secret = os.environ.get('DINGTALK_SECRET', '').strip()
+
+
+          # 1. 尝试以互动卡片高级格式发送 (POST /v1.0/im/interactiveCards/send)
+          if app_key and app_secret and chat_id and card_template_id:
+              print("使用钉钉互动卡片模板发送...")
+              try:
+                  token_url = "https://api.dingtalk.com/v1.0/oauth2/accessToken"
+                  req_t = urllib.request.Request(
+                      token_url,
+                      data=json.dumps({"appKey": app_key, "appSecret": app_secret}).encode('utf-8'),
+                      headers={"Content-Type": "application/json"}
+                  )
+                  with urllib.request.urlopen(req_t, timeout=10) as r:
+                      token = json.loads(r.read().decode('utf-8')).get('accessToken')
+
+                  card_url = "https://api.dingtalk.com/v1.0/im/interactiveCards/send"
+                  robot_code = os.environ.get('DINGTALK_ROBOT_CODE', '').strip() or app_key
+                  card_payload = {
+                      "cardTemplateId": card_template_id,
+                      "openConversationId": chat_id,
+                      "robotCode": robot_code,
+                      "outTrackId": f"deposit_{uuid.uuid4().hex[:16]}",
+                      "cardData": {
+                          "cardParamMap": {
+                              "repo": str(repo),
+                              "tag": str(data.get("tag")),
+                              "depositId": str(data.get("id")),
+                              "kind": str(data.get("kind")),
+                              "source": str(data.get("source", "GitHub 镜像 tag（真源）")),
+                              "commit": str(data.get("commit")),
+                              "artifactDigest": str(data.get("digest")),
+                              "txHash": str(data.get("tx_hash")),
+                              "blockNumber": str(data.get("block_number")),
+                              "gasUsed": str(data.get("gas_used")),
+                              "resultCode": f"result={data.get('result_code')}（成功）",
+                              "actor": os.environ.get("WORKFLOW_ACTOR", ""),
+                              "runUrl": os.environ.get("WORKFLOW_RUN_URL", ""),
+                              "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                              "issueUrl": str(issue_url)
+                          }
+                      }
+                  }
+                  req_card = urllib.request.Request(
+                      card_url,
+                      data=json.dumps(card_payload).encode('utf-8'),
+                      headers={"Content-Type": "application/json", "x-acs-dingtalk-access-token": token}
+                  )
+                  with urllib.request.urlopen(req_card, timeout=10) as r:
+                      print("钉钉互动卡片发送成功:", r.read().decode('utf-8'))
+                  exit(0)
+              except Exception as e:
+                  print(f"发送互动卡片失败: {e}，尝试降级为 ActionCard / Webhook...")
+
+          # 2. 降级为 Webhook 独立跳转 ActionCard 卡片格式
+          if webhook:
+              print("使用 Webhook ActionCard 卡片格式发送...")
+              target_url = webhook
+              if secret:
+                  timestamp = str(round(time.time() * 1000))
+                  string_to_sign = f"{timestamp}\n{secret}".encode("utf-8")
+                  hmac_code = hmac.new(secret.encode('utf-8'), string_to_sign, digestmod=hashlib.sha256).digest()
+                  sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+                  delim = '&' if '?' in target_url else '?'
+                  target_url = f"{target_url}{delim}timestamp={timestamp}&sign={sign}"
+
+              text_lines = [
+                  f"### 🚀 版本（tag）存证通知",
+                  f"**tag `{data.get('tag')}`**",
+                  "",
+                  "| 项目 | 值 |",
+                  "| :--- | :--- |",
+                  f"| 存证编号 | #{data.get('id')} |",
+                  f"| 类别 | {data.get('kind')} |",
+                  f"| 版本号 | `{data.get('tag')}` |",
+                  f"| 来源 | {data.get('source', 'GitHub 镜像 tag（真源）')} |",
+                  f"| commit | `{data.get('commit')}` |",
+                  f"| 产物摘要 (SHA256) | `{data.get('digest')}` |",
+                  f"| 交易 hash | `{data.get('tx_hash')}` |",
+                  f"| 区块高度 | {data.get('block_number')} |",
+                  f"| gasUsed | {data.get('gas_used')} |",
+                  f"| 上链结果 | result={data.get('result_code')}（成功） |"
+              ]
+              text_card = "\n".join(text_lines)
+
+              payload = {
+                  "msgtype": "actionCard",
+                  "actionCard": {
+                      "title": f"🎉 [{repo}] 版本 {data.get('tag')} 存证成功（已更新 Release）",
+                      "text": text_card,
+                      "singleTitle": "🔗 查看链上存证 Release",
+                      "singleURL": release_url
+                  }
+              }
+              req = urllib.request.Request(
+                  target_url,
+                  data=json.dumps(payload).encode('utf-8'),
+                  headers={"Content-Type": "application/json; charset=utf-8"}
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=10) as resp:
+                      print("DingTalk Webhook ActionCard 响应:", resp.read().decode('utf-8'))
+              except Exception as e:
+                  print(f"发送钉钉卡片通知异常: {e}")
+          EOF
+
+      - name: Notify Failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = '${{ steps.meta.outputs.tag || github.ref_name }}';
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `❌ [Deposit Failed] 版本 ${tag} 存证失败`,
+              body: `版本 **${tag}** 链上存证执行失败，详情请查看 [Actions Run Logs](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})。`,
+              labels: ['bug/deposit-failed', 'infra/actions-error']
+            });
