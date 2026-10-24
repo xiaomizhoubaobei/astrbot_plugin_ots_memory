@@ -57,6 +57,12 @@ jobs:
           fi
 
       # 4. 安装依赖
+      #    这里必须补装证据包内核的依赖：ci-evidence-pack 的打包脚本只把自身
+      #    src/ 塞进 PYTHONPATH，**不往调用方的解释器环境里装东西**（这是它有意
+      #    遵守的设计：Action 不该污染调用方环境）。于是内核 import typer 时
+      #    就会 ModuleNotFoundError——上一次运行红在第 9 步，根因其实在这里。
+      #    版本区间照抄该 action 的 pyproject.toml（typer>=0.12,<1.0），
+      #    别写死大版本，免得哪天内核换了依赖函数签名直接崩。
       - name: 安装依赖
         run: |
           if [ -f requirements.txt ] && [ -s requirements.txt ]; then
@@ -64,6 +70,8 @@ jobs:
           else
             echo "requirements.txt 不存在或为空，跳过依赖安装"
           fi
+          # 证据包内核的运行时依赖（工具链，不是本插件依赖，故不进 requirements.txt）
+          pip install 'typer>=0.12,<1.0'
 
       # 5. 创建插件目录
       - name: 创建插件目录
@@ -157,7 +165,8 @@ jobs:
       #   1) include 是必填项，空数组会让打包脚本直接 exit 1（本次运行失败的根因就是漏了它）；
       #   2) 产物目录默认是 _evidence（不是 _evidence_dist），上传步骤必须指向同一处；
       #   3) 签名产物是 cosign v3 的 .sigstore.json 单文件，旧版的 .sig / .crt 双文件已废弃，
-      #      继续按旧名上传只会得到 if-no-files-found: warn 的静默缺件。
+      #      继续按旧名上传只会得到 if-no-files-found: warn 的静默缺件；
+      #   4) 内核是 Python 程序，依赖（typer）要由调用方在第 4 步装好，见该步注释。
       - name: 生成证据包
         id: evidence
         if: always()
