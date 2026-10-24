@@ -73,6 +73,10 @@ jobs:
           fi
 
       # 4. 安装依赖
+      #    除插件自身依赖外，还要装证据包内核的依赖：ci-evidence-pack 只把自身
+      #    src/ 塞进 PYTHONPATH，不往调用方解释器环境装东西（刻意为之），
+      #    漏装时内核会在第 9 步以 ModuleNotFoundError: typer 报错。
+      #    版本区间与该 action 的 pyproject.toml 保持一致。
       - name: 安装依赖
         run: |
           if [ -f requirements.txt ] && [ -s requirements.txt ]; then
@@ -80,6 +84,8 @@ jobs:
           else
             echo "requirements.txt 不存在或为空，跳过依赖安装"
           fi
+          # 证据包内核的运行时依赖（工具链，不是本插件依赖，故不进 requirements.txt）
+          pip install 'typer>=0.12,<1.0'
 
       # 5. 创建插件目录
       - name: 创建插件目录
