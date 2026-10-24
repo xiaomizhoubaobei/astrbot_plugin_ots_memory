@@ -298,12 +298,29 @@ jobs:
 
       # 9. 生成证据包
       # 该第三方 action 运行在具备 contents: write / id-token: write 的任务中，
-      # 因此固定到不可变的 commit SHA（注释与 pin 的 SHA 保持一致，便于审计溯源）
+      # 因此固定到不可变的 commit SHA（注释与 pin 的 SHA 保持一致，便于审计溯源）。
+      # 说明：改用本组织重写版 xiaomizhoubaobei/ci-evidence-pack —— 上游 OrygnsCode
+      # 版本产出 .sig + .crt 双文件（cosign v3 已废弃该形态），且 verify 只信退出码。
       - name: 生成证据包
+        id: evidence
         if: always()  # 即使构建失败也运行，便于排查
-        uses: OrygnsCode/ci-evidence-pack@8222d7b3b015ce2f72222215bdf9966773036ab1 # 8222d7b3b015ce2f72222215bdf9966773036ab1
+        uses: xiaomizhoubaobei/ci-evidence-pack@deb80fb9cc60e07bb686acb3ea36031494b9b3b2
         with:
+          # include 为必填项：留空会让打包脚本直接 exit 1，而不是产出一个空包。
+          include: |
+            ${{ steps.get_info.outputs.plugin_name }}.zip
+            release_notes.md
+            metadata.yaml
+            requirements.txt
+            _conf_schema.json
+          out-dir: _evidence_dist
+          sbom: auto
           sign: 'true'
+          # 包外锚点：sha256 登记到包外台账，并贴进 Release 正文供下游核对。
+          anchor-file: _anchor/anchor.txt
+          expect-repo: ${{ github.repository }}
+          # 自检不通过即红：发出一份自己都不信的包，比不发更糟。
+          fail-on-invalid: true
 
       # 10. 创建 GitHub Release（tag 已存在则跳过，避免覆盖既有 Release 的资产与正文）
       - name: 创建 GitHub Release
@@ -322,22 +339,28 @@ jobs:
             本 Release 包含以下文件：
 
             - **${{ steps.get_info.outputs.plugin_name }}.zip**: 插件安装包
-            - **evidence-bundle.tar.gz**: CI 证据包（包含源代码、Git 元数据、依赖项、SBOM 等）
-            - **evidence-bundle.tar.gz.sig**: 证据包的 Sigstore 签名
-            - **evidence-bundle.tar.gz.crt**: 证据包的签名证书
+            - **evidence-\*.tar.gz**: CI 证据包（确定性打包 + 严格 manifest + SBOM）
+            - **evidence-\*.tar.gz.sigstore.json**: cosign v3 签名 bundle（keyless，OIDC 短期证书）
+            - **anchor.txt**: 证据包的包外 sha256 台账
 
-            证据包用于合规性审计和构建验证，可以使用以下命令验证：
+            证据包 sha256：`${{ steps.evidence.outputs.bundle-sha256 }}`
+
+            签名身份（identity）即本工作流的本次触发 ref，验签时可据此核对：
 
             ```bash
-            ci-evidence-pack verify evidence-bundle.tar.gz
+            cosign verify-blob \
+              --bundle evidence-*.tar.gz.sigstore.json \
+              --certificate-identity-regexp 'https://github.com/${{ github.repository }}/' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              evidence-*.tar.gz
             ```
           draft: false
           prerelease: false
           files: |
             ${{ steps.get_info.outputs.plugin_name }}.zip
-            _evidence_dist/*.tar.gz
-            _evidence_dist/*.sig
-            _evidence_dist/*.crt
+            ${{ steps.evidence.outputs.bundle-path }}
+            ${{ steps.evidence.outputs.signature-bundle }}
+            ${{ steps.evidence.outputs.anchor-file }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

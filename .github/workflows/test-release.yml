@@ -1,14 +1,9 @@
 name: 'Test Release 构建'
 
-# 触发条件：支持手动触发与特定测试分支推送
+# 触发条件：手动触发。本工作流只打包并留存证据，不创建正式 Release，
+# 故没有 dry_run 开关 —— 一个永真的布尔输入只会让人误以为「可以关掉什么」。
 on:
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: '仅测试打包与生成证据包，不创建正式 Release'
-        type: boolean
-        default: true
-        required: false
 
 permissions:
   contents: read
@@ -158,11 +153,33 @@ jobs:
           } >> $GITHUB_OUTPUT
 
       # 9. 生成证据包（使用 xiaomizhoubaobei/ci-evidence-pack）
+      # 三处必须按该 action 的契约来写，否则必然失败或产出「看似成功、实则空包」：
+      #   1) include 是必填项，空数组会让打包脚本直接 exit 1（本次运行失败的根因就是漏了它）；
+      #   2) 产物目录默认是 _evidence（不是 _evidence_dist），上传步骤必须指向同一处；
+      #   3) 签名产物是 cosign v3 的 .sigstore.json 单文件，旧版的 .sig / .crt 双文件已废弃，
+      #      继续按旧名上传只会得到 if-no-files-found: warn 的静默缺件。
       - name: 生成证据包
+        id: evidence
         if: always()
         uses: xiaomizhoubaobei/ci-evidence-pack@deb80fb9cc60e07bb686acb3ea36031494b9b3b2
         with:
+          # 收集范围：插件 zip 产物 + Release Notes + 构建输入清单。
+          # 目录整体收录会把 .git 与本地缓存一起塞进包里，故只列必需项。
+          include: |
+            ${{ steps.get_info.outputs.plugin_name }}.zip
+            release_notes.md
+            metadata.yaml
+            requirements.txt
+            _conf_schema.json
+          out-dir: _evidence
+          sbom: auto
           sign: 'true'
+          # 包外锚点：把 sha256 登记到包外的台账文件，随 artifact 一起上传，
+          # 供下载方核对「拿到的包」与「这里记录的摘要」是否一致。
+          anchor-file: _anchor/anchor.txt
+          expect-repo: ${{ github.repository }}
+          # 自检判定不通过就让步骤红。测试流水线的价值就在于「不合规当场喊出来」
+          fail-on-invalid: true
 
       # 10. 上传构建成果工件（供测试下载核验）
       - name: 上传构建与证据包产物
@@ -172,8 +189,8 @@ jobs:
           name: test-release-artifacts
           path: |
             ${{ steps.get_info.outputs.plugin_name }}.zip
-            _evidence_dist/*.tar.gz
-            _evidence_dist/*.sig
-            _evidence_dist/*.crt
             release_notes.md
+            ${{ steps.evidence.outputs.bundle-path }}
+            ${{ steps.evidence.outputs.signature-bundle }}
+            ${{ steps.evidence.outputs.anchor-file }}
           if-no-files-found: warn
