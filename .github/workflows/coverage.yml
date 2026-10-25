@@ -102,6 +102,10 @@ jobs:
         # 仅当拿到 token 才上报；token 为空时跳过，避免空 token 触发失败
         if: ${{ always() && env.CODECOV_TOKEN != '' }}
         continue-on-error: true
+        # 钉定 v7.1.1（提交 303a32d…）：不随 tag 浮动，避免上游改 tag 时静默换代码。
+        # v7.1.1 相对 v7.1.0 只把内置 wrapper 从 0.3.0 升到 0.3.1
+        # （CLI 下载/version 上报与 CLI 参数构造逻辑），action.yml 的 inputs 未变，
+        # 故 with 段保持原样无需调整。
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ./coverage.xml
@@ -112,6 +116,12 @@ jobs:
           name: python-3.13
           fail_ci_if_error: false
           verbose: true
+          # CLI 默认下载到检出根目录并长期留存；改用临时目录并在结束后清理，
+          # 避免工作区里多出一个 codecov 二进制（也只是卫生问题，非必要）。
+          cleanup: true
+          # 钉定 CLI 版本，避免 default 的 latest 静默漂移导致上传协议行为变化：
+          # 本次固定为 v11.3.1（与 upstream latest 口径一致），升级时需单独评审。
+          version: v11.3.1
 
       # 上传覆盖率报告工件，便于人工下载核对。
       - name: 上传覆盖率报告工件
