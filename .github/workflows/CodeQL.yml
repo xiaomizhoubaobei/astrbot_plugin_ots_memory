@@ -39,7 +39,8 @@ jobs:
       matrix:
         language: [ 'python' ]
         os: [ 'ubuntu-latest' ]
-        python-version: [ '3.12' ]
+        # 单版本工作流，与测试矩阵的起始版本对齐到 3.13
+        python-version: [ '3.13' ]
 
     steps:
     - name: 加固运行器（审计所有出站调用）

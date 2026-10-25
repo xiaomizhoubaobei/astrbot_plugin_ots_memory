@@ -167,7 +167,7 @@ git log --format='%h %G? %s' "$RANGE" | tee /tmp/sig.txt
 ## 2. 编码与代码规范 (Coding Standards)
 
 ### 2.1 语言与类型
-- 核心代码库使用 **Python** 编写（本项目为 AstrBot 插件，运行要求 Python 3.10+，CI 使用 3.12 校验）。
+- 核心代码库使用 **Python** 编写（本项目为 AstrBot 插件，运行要求 Python 3.10+，CI 在 3.13 / 3.14 / 3.15 矩阵上逐版本校验单测，覆盖率取 3.13）。
 - 函数与关键变量必须提供**类型注解**，并通过 `pre-commit` 中的 `mypy`（`ignore-missing-imports`）检查。
 - 禁止为图省事滥用 `Any`；能用具体类型或 `TypedDict` / `dataclass` 表达的地方必须明确类型。
 

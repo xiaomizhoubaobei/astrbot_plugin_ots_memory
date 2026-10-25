@@ -91,7 +91,7 @@ pip install pre-commit                    # 提交前自检（见「代码规范
 
 ## 代码规范
 
-核心代码为 **Python 3.10+**（CI 用 3.12 校验），提交前请务必跑一遍 pre-commit：
+核心代码为 **Python 3.10+**（CI 在 **3.13 / 3.14 / 3.15** 矩阵上逐版本跑单测，覆盖率的统计与上报取矩阵起始版本 3.13），提交前请务必跑一遍 pre-commit：
 
 ```bash
 pre-commit install            # 可选：装 git hook 自动执行
