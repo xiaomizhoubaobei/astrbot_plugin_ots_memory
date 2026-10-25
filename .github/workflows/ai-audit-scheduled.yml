@@ -317,7 +317,7 @@ jobs:
       #      正因如此，无 APPROVED 结论运行时 artifact 里根本不存在 `.enc`，publish 侧
       #      的判空短路无论如何都会命中，无需（也不应）依赖私钥。
       - name: 上传加密后的审计结论 artifact（空结论时只上传标记）
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: audit-verdicts
           path: |
