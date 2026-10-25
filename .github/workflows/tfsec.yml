@@ -43,7 +43,7 @@ jobs:
       - name: 加固运行器（审计所有出站调用）
         # 观察模式：egress-policy 保持 audit，仅记录出网调用、不阻断构建；
         # 与仓库内其余工作流口径统一（阻断模式需先凭审计日志收敛白名单）。
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
         with:
           egress-policy: audit
 
