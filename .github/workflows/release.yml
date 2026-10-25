@@ -376,17 +376,39 @@ jobs:
             emit "$MARKDOWN"
             exit 0
           fi
-          # 用证据包自带的 CLI 解析：它随 action 一起就位，无需另外 pip install。
-          # CLI 装在 action 路径下的 src 目录里，按 PYTHONPATH 借过来用。
-          ACTION_SRC="${GITHUB_ACTION_PATH:-}"
-          if [ -z "$ACTION_SRC" ]; then
-            echo "::warning::拿不到 GITHUB_ACTION_PATH，改走 pip 安装 evidence-pack"
-            python3 -m pip install --quiet 'evidence-pack>=0.0.1' || true
-          else
-            # 用 action 自带的 src 借 CLI（v0.0.1 的 entry point 就是
-            # evidence_pack.cli:main，`python3 -m evidence_pack` 是同一入口）。
-            export PYTHONPATH="$ACTION_SRC/src${PYTHONPATH:+:$PYTHONPATH}"
+          # 解析透明日志，用与上面 evidence 步骤**完全同一个 commit** 的 CLI。
+          #
+          # 不能用 `GITHUB_ACTION_PATH` 借 action 自带的源码：该变量只在 composite
+          # action 内部有效，普通 workflow step 里永远是空的。曾因此退化成
+          # `pip install 'evidence-pack>=0.0.1'` 的兜底 —— 一个可移动的版本区间，
+          # 会在本 job（contents: write + id-token: write）里装进没人审过的包。
+          #
+          # 也不能走 pip 的 VCS 安装（`package @ git+https://…@<sha>`）：本包
+          # pyproject.toml 在仓库根、源码在 src/，实测 pip 22 经由该路径构建出的
+          # 是空的 `UNKNOWN-0.0.0`（dist-info + LICENSE，无任何 py 文件），
+          # 装完 import 直接 ModuleNotFoundError。安静装个空包比装错版本更糟。
+          #
+          # 所以：按 SHA 取源码 → 验 SHA → 以 PYTHONPATH 直接用它，全程不经过
+          # PyPI、不构建包、不装 typer。rekor 子命令只用标准库（json/pathlib）。
+          # 注意这是裸 `python -m`，**不能**用 evidence_pack.cli 的 Typer 入口 ——
+          # 那条入口要 typer，而这里刻意不装依赖。
+          EVIDENCE_PACK_REV='89620dd3178b59d16daff98c9f2f4ca71e5d3ca5'
+          EVIDENCE_PACK_SRC="${RUNNER_TEMP:-/tmp}/ci-evidence-pack"
+          rm -rf "$EVIDENCE_PACK_SRC"
+          git init --quiet "$EVIDENCE_PACK_SRC"
+          git -C "$EVIDENCE_PACK_SRC" remote add origin \
+            https://github.com/xiaomizhoubaobei/ci-evidence-pack.git
+          git -C "$EVIDENCE_PACK_SRC" fetch --quiet --depth 1 origin "$EVIDENCE_PACK_REV" \
+            || { echo "::error::取不到 ci-evidence-pack@${EVIDENCE_PACK_REV}，无法解析透明日志"; exit 1; }
+          git -C "$EVIDENCE_PACK_SRC" checkout --quiet FETCH_HEAD
+          # 显式核对落地提交就是钉的那个：浅拉只给了 FETCH_HEAD，别把「取到了」
+          # 当成「取对了」。对不上就停，不用来源不明的解析器读证据。
+          GOT_REV=$(git -C "$EVIDENCE_PACK_SRC" rev-parse HEAD)
+          if [ "$GOT_REV" != "$EVIDENCE_PACK_REV" ]; then
+            echo "::error::ci-evidence-pack 提交不符：期望 ${EVIDENCE_PACK_REV}，实际 ${GOT_REV}"
+            exit 1
           fi
+          export PYTHONPATH="$EVIDENCE_PACK_SRC/src${PYTHONPATH:+:$PYTHONPATH}"
           if python3 -m evidence_pack rekor "${SIG_BUNDLE:-}" --json > _anchor/rekor.json 2>/dev/null; then
             python3 - "$MARKDOWN" <<'PY'
           import json
@@ -440,15 +462,23 @@ jobs:
 
             证据包 sha256：`${{ steps.evidence.outputs.bundle-sha256 }}`
 
-            签名身份（identity）即本工作流的本次触发 ref，验签时按它核对：
+            签名身份（identity）由 Action 按 `github.workflow_ref` 现拼，形如
+            `https://github.com/<owner>/<repo>/.github/workflows/release.yml@refs/heads/main`，
+            即「仓库 + 工作流文件 + 触发 ref」三者都定死。验签时按它核对：
 
             ```bash
             cosign verify-blob \
               --bundle evidence-*.tar.gz.sigstore.json \
-              --certificate-identity-regexp 'https://github.com/${{ github.repository }}/' \
+              --certificate-identity 'https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/heads/main' \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               evidence-*.tar.gz
             ```
+
+            注意：这里用的是 `--certificate-identity`（全等匹配），**不要**退化成
+            `--certificate-identity-regexp 'https://github.com/${{ github.repository }}/'`。
+            那条正则只锚到仓库前缀就收尾，同一仓库下**别的**工作流、**别的** ref
+            签出来的包也会被判通过 —— 而本工作流只在 `main` 上发布（job 级
+            `if: github.ref == 'refs/heads/main'`），身份只可能是这一个。
 
             ### 透明日志（Rekor）
 
