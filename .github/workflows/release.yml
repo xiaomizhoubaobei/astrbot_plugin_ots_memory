@@ -296,18 +296,27 @@ jobs:
             echo EOF
           } >> $GITHUB_OUTPUT
 
-      # 9. 生成证据包
-      # 该第三方 action 运行在具备 contents: write / id-token: write 的任务中，
-      # 因此固定到不可变的 commit SHA（注释与 pin 的 SHA 保持一致，便于审计溯源）。
-      # 说明：改用本组织重写版 xiaomizhoubaobei/ci-evidence-pack —— 上游 OrygnsCode
-      # 版本产出 .sig + .crt 双文件（cosign v3 已废弃该形态），且 verify 只信退出码。
+      # 9. 生成证据包（ci-evidence-pack v0.0.1）
+      #
+      # 引用方式：钉到 v0.0.1 的 commit SHA（89620dd3…），而不是 @main 或可移动的
+      # tag。浮动引用会让「本次跑的到底是哪一版」永远说不清，出了事故也无法回放。
+      #
+      # v0.0.1 的契约要点（与本段逐条对齐，改之前先读 action.yml）：
+      #   1) include 必填，留空会让打包脚本直接 exit 1，而不是产出一个空包；
+      #   2) 输出目录 ≠ 上传目录：本作业用 _evidence_dist，签名产物路径只能从
+      #      steps.evidence.outputs.* 取，手拼文件名会在改名时静默缺件；
+      #   3) 签名产物是 cosign v3 的 .sigstore.json 单文件，.sig + .crt 双文件形态已废弃；
+      #   4) 签名默认开启，信任根是 job 的 id-token: write（job 级 permissions 会
+      #      覆盖顶层声明，所以它必须写在本 job 上）；
+      #   5) identity 留空时按本次触发 ref 自动拼，这里**不写死** @refs/heads/main ——
+      #      写死会在 tag 触发的场景判 2「签名身份不是我以为的那个」。
       - name: 生成证据包
         id: evidence
-        if: always()  # 即使构建失败也运行，便于排查
-        # ⚠️ 临时用 @main 分支便于测试改动效果；验证完成后须回退为不可变 commit SHA。
-        uses: xiaomizhoubaobei/ci-evidence-pack@main
+        if: steps.get_info.outputs.tag_exists != 'true'
+        uses: xiaomizhoubaobei/ci-evidence-pack@89620dd3178b59d16daff98c9f2f4ca71e5d3ca5 # v0.0.1
         with:
-          # include 为必填项：留空会让打包脚本直接 exit 1，而不是产出一个空包。
+          # 收集范围：插件 zip 产物 + 发布正文 + 构建输入清单。
+          # 只列必需项，不整目录收录（否则 .git 与本地缓存会一起进包）。
           include: |
             ${{ steps.get_info.outputs.plugin_name }}.zip
             release_notes.md
@@ -317,11 +326,96 @@ jobs:
           out-dir: _evidence_dist
           sbom: auto
           sign: 'true'
-          # 包外锚点：sha256 登记到包外台账，并贴进 Release 正文供下游核对。
+          # 包外锚点：sha256 登记到包外台账，随 Release 一起分发供下游核对。
           anchor-file: _anchor/anchor.txt
           expect-repo: ${{ github.repository }}
           # 自检不通过即红：发出一份自己都不信的包，比不发更糟。
           fail-on-invalid: true
+
+      # 9.1 阻塞闸门：自检退出码非 0 就不许发布
+      # Action 内已按 fail-on-invalid 把步骤判红，这里再显式拦一道，确保后续
+      # 发布步骤不会在「证据无效」的状态下继续（2 = 证据无效，3 = 工具异常）。
+      - name: 校验证据包自检结论
+        if: steps.get_info.outputs.tag_exists != 'true'
+        env:
+          VERIFY_CODE: ${{ steps.evidence.outputs.verify-exit-code }}
+          VERIFY_OK: ${{ steps.evidence.outputs.verify-ok }}
+        run: |
+          set -euo pipefail
+          if [ "${VERIFY_CODE:-3}" != "0" ]; then
+            echo "::error::证据包自检未通过（退出码 ${VERIFY_CODE:-空}）：拒绝发布"
+            exit 1
+          fi
+          echo "证据包自检通过：verify-ok=${VERIFY_OK:-true}"
+
+      # 9.2 解出透明日志（Rekor）条目，供发布正文引用可复核位置
+      # 条目坐标只从签名 bundle 里读，不从日志文本里抠 —— logIndex / logId
+      # 只有那一处是权威的。读不出来不拦发布，但正文须如实写明「没有公开落点」。
+      - name: 解析 Rekor 透明日志条目
+        id: rekor
+        if: steps.get_info.outputs.tag_exists != 'true'
+        env:
+          SIG_BUNDLE: ${{ steps.evidence.outputs.signature-bundle }}
+        run: |
+          set -uo pipefail
+          mkdir -p _anchor
+          MARKDOWN=_anchor/rekor.md
+          # 正文走 heredoc 写进 step output：GITHUB_OUTPUT 支持多行值，
+          # 比「先存路径、再在发布正文里读文件」少一层对文件生命周期的依赖。
+          emit() {
+            {
+              echo 'notes<<REKOR_EOF'
+              cat "$1"
+              echo REKOR_EOF
+            } >> "$GITHUB_OUTPUT"
+          }
+          # `${VAR:-}`：set -u 下未注入该 env 时也不该炸，按「没有签名」处理。
+          if [ -z "${SIG_BUNDLE:-}" ] || [ ! -f "${SIG_BUNDLE:-}" ]; then
+            printf '%s\n' "- 本次未产出签名 bundle，因而没有透明日志条目；信任根只有上方 sha256 锚点。" > "$MARKDOWN"
+            echo "::warning::没有签名 bundle，跳过 Rekor 条目解析"
+            emit "$MARKDOWN"
+            exit 0
+          fi
+          # 用证据包自带的 CLI 解析：它随 action 一起就位，无需另外 pip install。
+          # CLI 装在 action 路径下的 src 目录里，按 PYTHONPATH 借过来用。
+          ACTION_SRC="${GITHUB_ACTION_PATH:-}"
+          if [ -z "$ACTION_SRC" ]; then
+            echo "::warning::拿不到 GITHUB_ACTION_PATH，改走 pip 安装 evidence-pack"
+            python3 -m pip install --quiet 'evidence-pack>=0.0.1' || true
+          else
+            # 用 action 自带的 src 借 CLI（v0.0.1 的 entry point 就是
+            # evidence_pack.cli:main，`python3 -m evidence_pack` 是同一入口）。
+            export PYTHONPATH="$ACTION_SRC/src${PYTHONPATH:+:$PYTHONPATH}"
+          fi
+          if python3 -m evidence_pack rekor "${SIG_BUNDLE:-}" --json > _anchor/rekor.json 2>/dev/null; then
+            python3 - "$MARKDOWN" <<'PY'
+          import json
+          import sys
+
+          markdown_path = sys.argv[1]
+          entries = json.load(open("_anchor/rekor.json", encoding="utf-8")).get("entries", [])
+          lines: list[str] = []
+          if not entries:
+              lines.append("- 签名 bundle 内**没有**透明日志条目：这条签名缺少可复核的公开落点，")
+              lines.append("  不能单独构成证据。请检查 Rekor 连通性。")
+          for entry in entries:
+              lines.append(f"- logIndex `{entry['log_index']}`，integratedTime `{entry['integrated_time']}`")
+              if entry["log_id"]:
+                  lines.append(f"  - logId `{entry['log_id']}`")
+              # 查询地址落在条目 uuid 上（/api/v1/log/entries/<uuid>），
+              # 不是 ?logIndex= —— 后者是给人翻页的过滤参数，不是定位符。
+              if entry["url"]:
+                  lines.append(f"  - 查询地址 {entry['url']}")
+          with open(markdown_path, "w", encoding="utf-8") as handle:
+              handle.write("\n".join(lines) + "\n")
+          PY
+          else
+            printf '%s\n' "- 条目解析失败，本次没有可复核的透明日志位置；信任根只有上方 sha256 锚点。" > "$MARKDOWN"
+            echo "::warning::Rekor 条目解析失败，发布正文将如实标注"
+          fi
+          rm -f _anchor/rekor.json
+          cat "$MARKDOWN"
+          emit "$MARKDOWN"
 
       # 10. 创建 GitHub Release（tag 已存在则跳过，避免覆盖既有 Release 的资产与正文）
       - name: 创建 GitHub Release
@@ -346,7 +440,7 @@ jobs:
 
             证据包 sha256：`${{ steps.evidence.outputs.bundle-sha256 }}`
 
-            签名身份（identity）即本工作流的本次触发 ref，验签时可据此核对：
+            签名身份（identity）即本工作流的本次触发 ref，验签时按它核对：
 
             ```bash
             cosign verify-blob \
@@ -355,6 +449,13 @@ jobs:
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
               evidence-*.tar.gz
             ```
+
+            ### 透明日志（Rekor）
+
+            签名写入公开透明日志后，任何人都能在包外独立复核「这条签名在某个时刻确实存在过」。
+            这是 sha256 锚点之外的第二个落点：锚点记在哪里由你决定，日志记在哪里由密码学决定。
+
+            ${{ steps.rekor.outputs.notes }}
           draft: false
           prerelease: false
           files: |
