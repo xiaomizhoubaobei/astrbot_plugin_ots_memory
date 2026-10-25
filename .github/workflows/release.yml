@@ -304,7 +304,8 @@ jobs:
       - name: 生成证据包
         id: evidence
         if: always()  # 即使构建失败也运行，便于排查
-        uses: xiaomizhoubaobei/ci-evidence-pack@deb80fb9cc60e07bb686acb3ea36031494b9b3b2
+        # ⚠️ 临时用 @main 分支便于测试改动效果；验证完成后须回退为不可变 commit SHA。
+        uses: xiaomizhoubaobei/ci-evidence-pack@main
         with:
           # include 为必填项：留空会让打包脚本直接 exit 1，而不是产出一个空包。
           include: |
