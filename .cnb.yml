@@ -5,7 +5,7 @@ $:
           imports:
             - https://cnb.cool/XMZZUZHI/key/-/blob/main/Claude.yml
           runner:
-            cpus: 32
+            cpus: 64
           services:
             - vscode
             - docker
