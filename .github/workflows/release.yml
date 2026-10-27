@@ -297,12 +297,12 @@ jobs:
             echo EOF
           } >> $GITHUB_OUTPUT
 
-      # 9. 生成证据包（ci-evidence-pack v0.0.1）
+      # 9. 生成证据包（ci-evidence-pack v0.0.2）
       #
-      # 引用方式：钉到 v0.0.1 的 commit SHA（89620dd3…），而不是 @main 或可移动的
+      # 引用方式：钉到 v0.0.2 的 commit SHA（53216365…），而不是 @main 或可移动的
       # tag。浮动引用会让「本次跑的到底是哪一版」永远说不清，出了事故也无法回放。
       #
-      # v0.0.1 的契约要点（与本段逐条对齐，改之前先读 action.yml）：
+      # v0.0.2 的契约要点（与本段逐条对齐，改之前先读 action.yml）：
       #   1) include 必填，留空会让打包脚本直接 exit 1，而不是产出一个空包；
       #   2) 输出目录 ≠ 上传目录：本作业用 _evidence_dist，签名产物路径只能从
       #      steps.evidence.outputs.* 取，手拼文件名会在改名时静默缺件；
@@ -314,7 +314,7 @@ jobs:
       - name: 生成证据包
         id: evidence
         if: steps.get_info.outputs.tag_exists != 'true'
-        uses: xiaomizhoubaobei/ci-evidence-pack@89620dd3178b59d16daff98c9f2f4ca71e5d3ca5 # v0.0.1
+        uses: xiaomizhoubaobei/ci-evidence-pack@53216365066a9fe64de178ab0184539ad253e355 # v0.0.2
         with:
           # 收集范围：插件 zip 产物 + 发布正文 + 构建输入清单。
           # 只列必需项，不整目录收录（否则 .git 与本地缓存会一起进包）。
@@ -393,7 +393,7 @@ jobs:
           # PyPI、不构建包、不装 typer。rekor 子命令只用标准库（json/pathlib）。
           # 注意这是裸 `python -m`，**不能**用 evidence_pack.cli 的 Typer 入口 ——
           # 那条入口要 typer，而这里刻意不装依赖。
-          EVIDENCE_PACK_REV='89620dd3178b59d16daff98c9f2f4ca71e5d3ca5'
+          EVIDENCE_PACK_REV='53216365066a9fe64de178ab0184539ad253e355'
           EVIDENCE_PACK_SRC="${RUNNER_TEMP:-/tmp}/ci-evidence-pack"
           rm -rf "$EVIDENCE_PACK_SRC"
           git init --quiet "$EVIDENCE_PACK_SRC"
