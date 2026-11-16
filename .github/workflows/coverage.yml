@@ -179,17 +179,19 @@ jobs:
           python -m pytest -q
 
   # 汇总门禁：分支保护只认这一个检查项，避免每加一个版本都要改一次保护规则。
-  # 任一矩阵任务失败 / 被取消，这里都会失败，故不会被单个版本的红灯漏过。
+  # 任一矩阵任务失败时这里一并失败，故不会被单个版本的红灯漏过。
+  # 矩阵被取消（典型是同一 PR 的新提交触发了更新运行，旧运行被 concurrency 终止）
+  # 时直接跳过：既不能把「没跑完」伪装成通过，也不该在旧运行上留下误导性的红灯；
+  # 权威结论以同一 PR 最新一次运行的汇总为准。
   tests-gate:
     name: 单测矩阵汇总
     runs-on: ubuntu-latest
     needs: tests
-    if: always()
+    if: always() && needs.tests.result != 'cancelled'
     steps:
       - name: 校验矩阵结果
         run: |
-          # needs.tests.result 在「至少一个失败」「被取消」时都不是 success，
-          # 故这里用严格相等判定，任何非 success 都判失败。
+          # 执行到这里说明矩阵未被取消：只接受 success，failure / skipped 等一律拦下。
           if [ "${{ needs.tests.result }}" != "success" ]; then
             echo "❌ 单测矩阵未全部通过：${{ needs.tests.result }}"
             exit 1
