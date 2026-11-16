@@ -65,7 +65,36 @@ $:
                     - python -c "import astrbot; print('astrbot 导入成功:', astrbot.__file__)"
 
 main:
-      # 注意：CNB 侧只干一件事——把代码同步到 GitHub 镜像仓库。
+      # CNB 是主仓，PR 分支不会同步到 GitHub 镜像，因此 PR 门禁必须在 CNB 侧跑。
+      # 这里只跑最小检查集（代码规范 + 单测），3.13/3.14/3.15 矩阵、覆盖率上报、
+      # CodeQL 等仍由 GitHub Actions 负责；push 到 main 时只做镜像同步。
+      # 注意：以上只是「跑检查」，要真正阻止合并还需在仓库设置中把 main 设为
+      # 保护分支并开启「需要通过状态检查」。
+      pull_request:
+        - docker:
+            image: docker.cnb.cool/xmzzuzhi/cnb-docker/python:0.0.1
+          runner:
+            cpus: 4
+          stages:
+            - name: 安装 AstrBot 宿主与依赖
+              script:
+                    - pip install --upgrade pip
+                    - |
+                      for i in 1 2 3; do
+                        git clone --depth 1 https://github.com/AstrBotDevs/AstrBot.git /tmp/AstrBot && break
+                        echo "第 $i 次克隆失败，10 秒后重试"; rm -rf /tmp/AstrBot; sleep 10
+                      done
+                      test -d /tmp/AstrBot/astrbot || { echo "❌ AstrBot 源码拉取失败"; exit 1; }
+                    - pip install -e /tmp/AstrBot
+                    - pip install -r requirements-dev.txt
+            - name: 代码规范检查
+              script:
+                    - pip install pre-commit
+                    - pre-commit run --all-files
+            - name: 单元测试与覆盖率
+              script:
+                    - python -m tests.run_coverage
+      # push 到 main：只把代码同步到 GitHub 镜像仓库。
       # 单测覆盖率、Release 与插件 zip 打包统一由 GitHub Actions 产出
       # （.github/workflows/coverage.yml、release.yml），CNB 不再重复构建 zip。
       push:
