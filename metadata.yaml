@@ -2,7 +2,7 @@ name: astrbot_plugin_ots_memory
 display_name: 百炼长期记忆
 short_desc: 基于阿里云百炼记忆库的跨会话长期记忆插件
 desc: 基于阿里云百炼（Model Studio）记忆库的跨会话长期记忆插件。支持按用户隔离、事实记忆与用户画像、语义检索及对话结束自动沉淀。
-version: 1.0.0
+version: 1.0.1
 author: 祁筱欣
 repo: https://cnb.cool/XMZZUZHI/Astrbot/astrbot_plugin_ots_memory
 # 安全漏洞私密报告联系邮箱（权威说明见 SECURITY.md「报告漏洞」）。

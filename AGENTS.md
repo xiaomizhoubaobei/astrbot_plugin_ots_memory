@@ -746,7 +746,7 @@ python3 /app/scripts/bailian-memory.py delete --node-id node_abc
 | --- | --- |
 | 名称 | `astrbot_plugin_ots_memory` |
 | 类型 | AstrBot 插件（Python） |
-| 版本 | v1.0.0 |
+| 版本 | v1.0.1 |
 | 作者 | 祁筱欣 |
 | Python | 3.10+（开发与运行环境） |
 | 上游服务 | 阿里云百炼（Model Studio）记忆库 |
