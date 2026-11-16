@@ -77,16 +77,21 @@ main:
             cpus: 4
           stages:
             - name: 安装 AstrBot 宿主与依赖
+              # 整段放在同一个 script 块里：CNB 会把 script 数组用 && 拼接，
+              # 多行 for 循环与后续命令拼在一起会产生 "&& unexpected" 语法错误。
               script:
-                    - pip install --upgrade pip
                     - |
+                      set -e
+                      pip install --upgrade pip
                       for i in 1 2 3; do
                         git clone --depth 1 https://github.com/AstrBotDevs/AstrBot.git /tmp/AstrBot && break
-                        echo "第 $i 次克隆失败，10 秒后重试"; rm -rf /tmp/AstrBot; sleep 10
+                        echo "第 $i 次克隆失败，10 秒后重试"
+                        rm -rf /tmp/AstrBot
+                        sleep 10
                       done
                       test -d /tmp/AstrBot/astrbot || { echo "❌ AstrBot 源码拉取失败"; exit 1; }
-                    - pip install -e /tmp/AstrBot
-                    - pip install -r requirements-dev.txt
+                      pip install -e /tmp/AstrBot
+                      pip install -r requirements-dev.txt
             - name: 代码规范检查
               script:
                     - pip install pre-commit
