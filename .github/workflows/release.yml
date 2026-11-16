@@ -95,7 +95,7 @@ jobs:
           # 插件必需文件：缺失即失败，避免产出残缺包却发布成功
           cp main.py "$PLUGIN_NAME/"
           cp metadata.yaml requirements.txt _conf_schema.json "$PLUGIN_NAME/"
-          # 复制插件入口与核心模块（client.py 承载 OTS V4 签名与 REST 交互）
+          # 复制插件入口与核心模块（client.py 承载百炼记忆库 REST 交互）
           cp __init__.py "$PLUGIN_NAME/"
           cp client.py "$PLUGIN_NAME/"
           # 复制 logo 文件（可选，缺失不影响插件运行）
@@ -257,7 +257,7 @@ jobs:
 
           if [ -z "$PREVIOUS_TAG" ]; then
             # 首次 Release
-            NOTES="## 🎉 首次 Release v${VERSION}\n\n这是 Tablestore 长期记忆插件的首次正式 Release。\n\n### 功能特性\n\n- 按需召回：recall_memory Tool，模型需要时主动检索历史记忆\n- 主动记录：save_memory Tool，重要信息一键沉淀进记忆库\n- 自动沉淀：每轮对话结束后异步投递 Tablestore（可关闭）\n- 纯异步实现：原生 aiohttp + OTS V4 签名，无 CLI / Node.js 依赖\n\n### 使用方法\n\n请参考项目 README.md 了解详细使用方法。"
+            NOTES="## 🎉 首次 Release v${VERSION}\n\n这是百炼长期记忆插件的首次正式 Release。\n\n### 功能特性\n\n- 按用户隔离：以平台适配器 ID + 发送者 ID 作为记忆实体\n- 按需召回：recall_memory Tool，模型需要时主动检索历史记忆\n- 主动记录：save_memory Tool，重要信息一键沉淀进记忆库\n- 自动沉淀：每轮对话结束后异步投递百炼记忆库（可关闭）\n- 用户画像：可选配置画像模板，由百炼自动提取用户特征\n- 纯异步实现：原生 aiohttp + Bearer 鉴权，无 SDK / CLI / Node.js 依赖\n\n### 使用方法\n\n请参考项目 README.md 了解详细使用方法。"
           else
             # 检查是否存在 CHANGELOG.md
             if [ -f "CHANGELOG.md" ]; then

@@ -6,11 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概览
 
-`astrbot_plugin_ots_memory` 是 AstrBot（`astrbot_version >= 4.0.0`）插件，把跨会话长期记忆存进阿里云表格存储（Tablestore）Memory Store。
+`astrbot_plugin_ots_memory` 是 AstrBot（`astrbot_version >= 4.0.0`）插件，把跨会话长期记忆存进阿里云百炼（Model Studio）记忆库。
 
 - 仓库根即包根（`__init__.py` 在根），宿主按目录名作为包名加载插件。
 - 运行形态是「插件跑在 AstrBot 源码宿主上」：`main.py` 依赖 `astrbot.api` / `astrbot.core.*`，缺宿主时整个 `main.py` 连导入都不成立。
-- 仅两个业务文件：`client.py` 负责 OTS 协议与签名，`main.py` 负责宿主集成（Star 生命周期、LLM 工具、自动沉淀钩子）。
+- 仅两个业务文件：`client.py` 负责百炼 REST 调用与错误脱敏，`main.py` 负责宿主集成（Star 生命周期、LLM 工具、按用户隔离、自动沉淀钩子）。
 
 ## 常用命令
 
@@ -27,11 +27,11 @@ pip install pre-commit
 
 ```bash
 python -m tests.run_coverage                 # 跑 tests + 打印报告 + 写 coverage.xml（CI 用这条）
-python -m tests.run_coverage -- -k signing   # -- 之后的参数原样透传给 pytest
+python -m tests.run_coverage -- -k payload  # -- 之后的参数原样透传给 pytest
 python -m tests.run_coverage --report-only   # 不复跑测试，只基于已有 .coverage 出报告
 python -m pytest -q                          # 只跑测试（CI 的纯单测矩阵用这条）
 python -m pytest tests/test_client.py -q     # 单文件
-python -m pytest tests/test_client.py::test_endpoint_trailing_slash_stripped -q   # 单条
+python -m pytest tests/test_client.py::test_base_url_trailing_slash_stripped -q   # 单条
 ```
 
 代码规范：
@@ -48,8 +48,8 @@ pre-commit run --all-files
 
 | 位置 | 职责 | 关键符号 |
 | --- | --- | --- |
-| `main.py` | 宿主集成层 | `OTSMemoryPlugin`、`RecallMemoryTool`、`SaveMemoryTool`、`_tool_result()`、`_segment_texts()`、`_safe_error_text()` |
-| `client.py` | 传输层：OTS V4 签名与 REST 调用 | `OTSMemoryClient._get_signing_key()` / `_build_headers()` / `_request()` / `search_memories()` / `add_memories()` |
+| `main.py` | 宿主集成层 | `BailianMemoryPlugin`、`RecallMemoryTool`、`SaveMemoryTool`、`_build_user_id()`、`_tool_result()`、`_segment_texts()`、`_safe_error_text()` |
+| `client.py` | 传输层：百炼记忆库 REST 调用 | `BailianMemoryClient._request()` / `search_memories()` / `add_memories()` |
 | `_conf_schema.json` | AstrBot 配置界面 schema；字段名必须与 `main.py` 读取的 key 一致 | — |
 | `metadata.yaml` | 插件元数据；`version` 是 Release 打 tag 的唯一来源 | — |
 | `tests/` | 单测 + 包视图 + 覆盖率启动器（见下文「测试体系」） | `package_view.py`、`meta_path.py`、`run_coverage.py` |
@@ -60,33 +60,34 @@ pre-commit run --all-files
 ```text
 AstrBot 对话
   ├─ LLM 调 recall_memory(query)
-  │    → OTSMemoryClient.search_memories() → POST /SearchMemories
-  │    → 结果格式化为 "[相关度 0.xx] <text>" 多行返回；空结果返回「没有找到相关的历史记忆。」
+  │    → BailianMemoryClient.search_memories(user_id, query) → POST /memory_nodes/search
+  │    → 结果按 content 逐行返回；空结果返回「没有找到相关的历史记忆。」
   ├─ LLM 调 save_memory(fact)
-  │    → OTSMemoryClient.add_memories(text=fact) → POST /AddMemories（userMemories 数组）
+  │    → BailianMemoryClient.add_memories(user_id, text=fact) → POST /add（custom_content）
   └─ 回复结束（@filter.on_decorating_result）
-       → auto_record=true 且 client 存在时，asyncio.create_task 后台 POST /AddMemories（messages 数组）
+       → auto_record=true 且 client 存在时，asyncio.create_task 后台 POST /add（messages 数组）
 ```
 
-- **初始化与停用**：`OTSMemoryPlugin.__init__` 检查 `endpoint` / `instance_name` / `access_key_id` / `access_key_secret` 四项。缺任一项 → `client = None`、打 `warning`、**不注册任何工具**；齐全才构造客户端并 `context.add_llm_tools(...)`。
-- **记忆隔离**：请求里的 `scope` 由配置项 `app_id` 与代码内固定的 `tenant_id = "default"` 组成；`memory_store_name` 默认 `huawu_memory`。
-- **检索参数**：`top_k` / `min_score` 来自配置；`enableRerank` 固定为 `True`；仅当 `min_score > 0` 才下发 `thresholds.minScore`。
-- **自动沉淀**：用户消息取 `event.get_messages()` 的所有非空文本段；assistant 内容只取回复链 `result.chain` 的**第一段**文本。缺用户文本或缺回复文本时直接跳过。后台任务异常只 `warning`，不向对话链逃逸。
-- **签名**：`_build_headers` 组装 `x-ots-*` 头（含 `x-ots-contentmd5`、`x-ots-date`、`x-ots-signdate`、`x-ots-signregion`），按字典序拼 Canonical Request，再用四级 HMAC-SHA256 派生密钥签出 `x-ots-signaturev4`。这是刻意自研——不要为省事引入 Tablestore SDK，也不要改写成非标准实现。
-- **出站约束**：`_request` 显式 `allow_redirects=False`，保证出站目标只有配置的 endpoint；非 2xx（含 3xx）统一抛中文 `RuntimeError`。
+- **初始化与停用**：`BailianMemoryPlugin.__init__` 检查 `dashscope_api_key` 与 `api_base_url`。缺任一项 → `client = None`、打 `warning`、**不注册任何工具**；齐全才构造客户端并 `context.add_llm_tools(...)`。
+- **按用户隔离**：`_build_user_id(event)` 用「`get_platform_id()` + `get_sender_id()`」构造 `user_id`；超过 64 字符时改用 `astrbot_<sha256 前 56 位>`。工具与自动沉淀都从这里取实体，不能退化成全局共享。
+- **检索参数**：`top_k` / `min_score` / `rewrite` / `rerank` / `plan_version` 来自配置；仅当 `min_score > 0` 才下发 `similarity_threshold`。
+- **自动沉淀**：用户消息取 `event.get_messages()` 的所有非空文本段；assistant 内容只取回复链 `result.chain` 的**第一段**文本。消息超过百炼 50 条上限时保留最近部分。后台任务异常只 `warning`，不向对话链逃逸。
+- **请求与重试**：`_request` 使用 Bearer 鉴权与 `allow_redirects=False`；429 / 5xx 按 1s / 2s / 4s 退避（最多 4 次尝试），其它 4xx 快速失败。不要为省事引入百炼 SDK。
+- **错误脱敏**：非 2xx 统一抛中文 `RuntimeError`，文本只含 `status` 与截断到 64 字符的 `request_id`；响应体既不进异常也不进日志。
 
 ### 配置项（`_conf_schema.json` 与 `main.py` 默认值）
 
 | Key | 默认值 | 作用 |
 | --- | --- | --- |
-| `endpoint` | 空（必填） | Tablestore 实例地址；客户端会去掉末尾 `/` |
-| `instance_name` | 空（必填） | 实例名，进 `x-ots-instancename` |
-| `region` | `cn-shanghai` | 签名派生与 `x-ots-signregion` |
-| `access_key_id` / `access_key_secret` | 空（必填） | OTS 鉴权 |
-| `memory_store_name` | `huawu_memory` | 请求体 `memoryStoreName` |
-| `app_id` | `astrbot` | 请求体 `scope.appId`，记忆隔离命名空间 |
-| `top_k` | `5` | 检索返回条数上限 |
-| `min_score` | `0.4` | 相关度阈值；`0` 表示不下发阈值 |
+| `dashscope_api_key` | 空（必填） | 百炼 API Key，Bearer 鉴权；只从配置读取 |
+| `api_base_url` | `https://dashscope.aliyuncs.com/api/v2/apps/memory` | 服务地址；业务空间专属域名可覆盖，末尾 `/` 会被剥离 |
+| `memory_library_id` | 空 | 记忆库 ID；空则使用服务端默认库 |
+| `profile_schema` | 空 | 画像模板 ID；空则不提取画像 |
+| `project_id` | 空 | 事实记忆规则 ID |
+| `top_k` | `5` | 检索条数，收敛到 1~100 |
+| `min_score` | `0.6` | 相似度阈值，收敛到 0.0~1.0；`0` 表示不下发 |
+| `rewrite` / `rerank` | `true` | 查询改写 / 结果重排 |
+| `plan_version` | `Pro` | `Pro` 或 `Lite`；非法值回落 `Pro` |
 | `auto_record` | `true` | 是否在每轮对话后自动沉淀 |
 
 ## 必须保持的契约（改代码前先读）
@@ -94,12 +95,13 @@ AstrBot 对话
 1. **工具返回值**：`ToolExecResult` 是 `str | CallToolResult` 的**联合别名，不可调用**。构造结果一律走 `main.py` 的 `_tool_result()`；错误必须显式 `CallToolResult(content=[TextContent(type="text", text=...)], isError=True)`，否则运行时抛 `TypeError: 'types.UnionType' object is not callable`。
 2. **工具上的 `plugin` 字段**：pydantic dataclass 中必须写 `Optional[Any] = Field(default=None, exclude=True)`。标注真实插件类会抛 `PydanticSchemaGenerationError`（宿主 `FunctionTool` 未开 `arbitrary_types_allowed`）；不加 `exclude=True` 则会让宿主引用进入工具序列化。
 3. **错误信息脱敏契约**：上游错误体可能回显用户记忆内容，因此
-   - `client._request` 的异常文本**只含** `status` 与截断到 64 字符的 `x-ots-requestid`，不夹带响应体；
+   - `client._request` 的异常文本**只含** `status` 与截断到 64 字符的 `request_id`，不夹带响应体；
    - 工具层只返回固定中文提示（`检索记忆失败，请稍后重试。` / `保存记忆失败，请稍后重试。`），不回显堆栈或异常文本；
    - 日志只留异常类型、`_safe_error_text()` 压缩后的摘要（≤200 字符）与 `status` / `request_id`。
 4. **失败降级**：配置不全时插件停用自身而非崩溃；`auto_record` 后台任务异常只告警；`add_memories` 在 `messages` 与 `text` 同时为空时抛 `ValueError`。
-5. **签名与依赖边界**：`requirements.txt` 只有 `aiohttp`；不要引入 OTS SDK 或 Node.js 工具链。
-6. **发布包边界**：唯一入口是 `.github/workflows/release.yml` 的**复制白名单**（`main.py __init__.py client.py metadata.yaml requirements.txt _conf_schema.json` + 可选 `logo.png`），随后还有断言阻止包内出现白名单外条目。新增需要随插件发布的文件时只改白名单。
+5. **按用户隔离**：工具调用通过 `ContextWrapper[AstrAgentContext].context.event` 取发送者；构造失败时返回错误，**禁止**回落到全局共享实体。
+6. **REST 与依赖边界**：`requirements.txt` 只有 `aiohttp`；不要引入百炼 SDK 或 Node.js 工具链。
+7. **发布包边界**：唯一入口是 `.github/workflows/release.yml` 的**复制白名单**（`main.py __init__.py client.py metadata.yaml requirements.txt _conf_schema.json` + 可选 `logo.png`），随后还有断言阻止包内出现白名单外条目。新增需要随插件发布的文件时只改白名单。
 
 ## 测试体系
 
@@ -121,11 +123,11 @@ AstrBot 对话
 
 | 文件 | 锁定的内容 |
 | --- | --- |
-| `tests/test_client.py` | 签名派生确定性、已知答案向量、`x-ots-*` 头、content-md5、payload 组装、`allow_redirects=False`、错误不回显响应体、request_id 截断、logger 来源 |
-| `tests/test_main.py` | 工具可实例化、`plugin` 字段不进 schema、空参数/未初始化客户端分支、召回格式化、错误包装、插件注册与停用、配置默认值、`auto_record` 各分支、钩子注册 |
+| `tests/test_client.py` | Bearer 头、URL/payload 组装、messages 与 custom_content、参数边界、`allow_redirects=False`、错误不回显响应体、request_id 截断、429/5xx 重试、logger 来源 |
+| `tests/test_main.py` | 工具可实例化、`plugin` 字段不进 schema、`_build_user_id` 各分支、空参数/未初始化客户端/缺发送者分支、召回格式化、错误包装、插件注册与停用、配置默认值、`auto_record` 各分支、钩子注册 |
 | `tests/test_package_import.py` | 包视图自洽、coverage source 可解析、顶层包名与子模块导入 |
 
-写新用例的现成手法：`_FakeClient` / `_FakePlugin`（`test_main.py`）隔离网络与完整 Star 实例；`fake_aiohttp`（`test_client.py`）替换 session，断言真实发出的请求体、头与重定向参数。单测一律使用假 AK/SK 与假记忆内容。
+写新用例的现成手法：`_FakeClient` / `_FakePlugin` / `_FakeEvent` / `_ToolContext`（`test_main.py`）隔离网络、宿主事件与完整 Star 实例；`fake_aiohttp` 与 `no_sleep`（`test_client.py`）替换 session 并跳过重试等待，断言真实发出的请求体、头与重定向参数。单测一律使用假 API Key 与假记忆内容。
 
 ### 覆盖率口径
 
@@ -136,7 +138,7 @@ AstrBot 对话
 
 - **`.github/workflows/coverage.yml`**：两个 job。`coverage` 在 Python 3.13/3.14/3.15 矩阵跑 `python -m tests.run_coverage`，仅 3.13 上报 Codecov；`tests` 在同样矩阵跑 `python -m pytest -q`。两者都先从上游源码 `pip install -e` 宿主。
 - **`.github/workflows/release.yml`**：`push` 到 `main` 且改动含 `**/*.py` 时触发（也可手动），job 级限制 `github.ref == 'refs/heads/main'`。版本取自 `metadata.yaml` 的 `version`（去掉可能的 `v` 前缀），tag 为 `v<version>`；tag 已存在则跳过发布，需重新发布先提升版本号。之后按白名单复制、打 zip、断言边界，再创建 Release 并附 zip 与 Sigstore 证据资产。
-- **`.cnb.yml`**：`main` push 时只用 `git-sync` **强制覆盖**同步到 GitHub 镜像仓库（`github.com/xiaomizhoubaobei/astrbot_plugin_ots_memory`）；CNB 不跑测试、不打包。其 `vscode` 任务会把上游 AstrBot 克隆到 `/workspace/AstrBot` 并以 editable 安装，这是 CNB 开发环境里插件能导入的原因。
+- **`.cnb.yml`**：`main.pull_request` 跑 PR 门禁（pre-commit + 单测 + `testing:coverage` 覆盖率上报），`main` push 时只用 `git-sync` **强制覆盖**同步到 GitHub 镜像仓库（`github.com/xiaomizhoubaobei/astrbot_plugin_ots_memory`）；CNB 不打包。其 `vscode` 任务会把上游 AstrBot 克隆到 `/workspace/AstrBot` 并以 editable 安装，这是 CNB 开发环境里插件能导入的原因。覆盖率上报前须过滤掉 coverage.py 为零语句文件生成的、缺少 `LF/LH` 的空 lcov 记录，否则 CNB 汇总会变成 NaN。
 - **其他工作流**：CodeQL、Python 依赖审计、dependency-review、secret-scanning、Scorecard、tfsec、stale，以及 `ai-audit-scheduled.yml`（用 LLM 对 CodeQL 告警做分流并创建 Issue）。改这些工作流时保持既有的权限最小化、action 钉定提交 SHA、`persist-credentials: false` 与 harden-runner 约定。
 
 ## 改动落点
@@ -154,7 +156,7 @@ AstrBot 对话
 - Python 3.10+；`black --target-version py312`、`flake8 --max-line-length=100 --extend-ignore=E203,W503`、`isort --profile black`、`mypy --ignore-missing-imports`、`pydocstyle --convention=google`。
 - `mypy` 配了 `explicit_package_bases = true` + `mypy_path = ".."`，否则仓库根既像包根又像 workspace 会让 `tests/` 报「source file found twice」。
 - `ai-audit/` 被 mypy / pydocstyle 排除：目录名含连字符，本身不是合法 Python 包名。
-- 类型注解尽量具体，避免 `Any`（pydantic 工具的 `plugin` 字段是必要的例外）；核心逻辑、阈值、签名与正则需写中文注释说明「为什么」。
+- 类型注解尽量具体，避免 `Any`（pydantic 工具的 `plugin` 字段是必要的例外）；核心逻辑、阈值、鉴权/请求与正则需写中文注释说明「为什么」。
 - 业务日志统一用 `astrbot.api.logger`，禁止 `print()`。
 
 ## Git 与协作

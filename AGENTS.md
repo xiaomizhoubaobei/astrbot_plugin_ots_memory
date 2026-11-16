@@ -7,7 +7,7 @@
 > 本文件是仓库内**唯一的 Agent 入口文档**，同时承载两类内容：
 > **第 1~7 章与第 9 章**为组织级通用协作规范（怎么干活，含第 9 章「阿里云百炼记忆库」）；**第 10 章**为 `astrbot_plugin_ots_memory` 本项目的技术上下文（这是什么项目）。
 >
-> 项目：`astrbot_plugin_ots_memory` — AstrBot 的长期记忆插件，基于阿里云表格存储（Tablestore）Memory Store，支持按需召回、主动记录与每轮对话自动沉淀。
+> 项目：`astrbot_plugin_ots_memory` — AstrBot 的长期记忆插件，基于阿里云百炼（Model Studio）记忆库，支持按用户隔离、按需召回、主动记录与每轮对话自动沉淀。
 >
 > 📜 **面向人的社区规范**见 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)（贡献者行为准则，含涉密信息、AI 参与边界、记忆数据伦理与漏洞披露约定）；本文件规则与之冲突时，以更严格者为准。
 
@@ -229,14 +229,15 @@ git log --format='%h %G? %s' "$RANGE" | tee /tmp/sig.txt
 
 ## 5. 特定业务逻辑指导 (Domain Specifics)
 
-### 5.1 上游接口调用（阿里云 Tablestore Memory Store）
-- **签名与请求**：`client.py` 内自研 OTS V4 签名（HMAC-SHA256 + Canonical Request），禁止为了「省事」引入庞大 SDK 或把签名逻辑改写为非标准实现。
-- **错误转换**：上游非 2xx 一律在上层转换为中文 `RuntimeError`（`OTS 接口错误 [status=<status>] request_id=<request_id|\<none\>]`），**异常文本只承载 `status` 与截断后的 `x-ots-requestid`（≤64 字符）**，严禁夹带上游响应体；由工具层捕获后返回**固定中文提示**（`检索记忆失败，请稍后重试。` / `保存记忆失败，请稍后重试。`），禁止把原始堆栈或异常文本回显给用户。
-- **日志脱敏**：上游错误日志只记录 `status` 与截断后的 `x-ots-requestid`（≤64 字符），**禁止**把响应体整段落盘——错误体可能极大或回显用户记忆内容。
+### 5.1 上游接口调用（阿里云百炼记忆库）
+- **请求方式**：`client.py` 直接调用百炼记忆库 REST API（`/add`、`/memory_nodes/search`），使用 `aiohttp` + Bearer 鉴权；禁止为了「省事」引入庞大 SDK。
+- **错误转换**：上游非 2xx 一律在上层转换为中文 `RuntimeError`（`百炼记忆接口错误 [status=<status>] request_id=<request_id|\<none\>]`），**异常文本只承载 `status` 与截断后的 `request_id`（≤64 字符）**，严禁夹带上游响应体；由工具层捕获后返回**固定中文提示**（`检索记忆失败，请稍后重试。` / `保存记忆失败，请稍后重试。`），禁止把原始堆栈或异常文本回显给用户。
+- **日志脱敏**：上游错误日志只记录 `status` 与截断后的 `request_id`（≤64 字符），**禁止**把响应体整段落盘——错误体可能极大或回显用户记忆内容。
 - **失败降级**：任何异步沉淀（`auto_record`）异常只记录 `warning`，不得逃逸到对话链；配置不全时插件**禁用自身而非崩溃**。
+- **按用户隔离**：`user_id` 必须由消息事件（平台适配器 ID + 发送者 ID）构造，禁止退化为全局共享实体。
 
 ### 5.2 记忆数据与凭据
-- AccessKey / SecretKey 只从插件配置读取，**禁止**硬编码、禁止进日志、禁止进 Issue / PR 评论。
+- API Key 只从插件配置读取，**禁止**硬编码、禁止进日志、禁止进 Issue / PR 评论。
 - 单测与示例一律使用假数据，**禁止**触碰真实用户的记忆内容（详见 `CODE_OF_CONDUCT.md` 4.3）。
 
 ## 6. CNB OpenAPI 操作规范 (CNB OpenAPI Operations)
@@ -748,10 +749,10 @@ python3 /app/scripts/bailian-memory.py delete --node-id node_abc
 | 版本 | v1.0.0 |
 | 作者 | 祁筱欣 |
 | Python | 3.10+（开发与运行环境） |
-| 上游服务 | 阿里云表格存储（Tablestore）Memory Store |
-| 主要依赖 | `aiohttp`（原生异步网络与签名，无 CLI/Node.js 冗余依赖） |
+| 上游服务 | 阿里云百炼（Model Studio）记忆库 |
+| 主要依赖 | `aiohttp`（原生异步 REST，无 SDK / CLI / Node.js 冗余依赖） |
 
-插件基于阿里云表格存储 Memory Store 实现跨会话长期记忆存储与检索，支持 Tool 模式按需回忆（`recall_memory`）与保存（`save_memory`），并支持每轮对话异步自动沉淀。
+插件基于阿里云百炼记忆库实现跨会话长期记忆存储与检索，支持 Tool 模式按需回忆（`recall_memory`）与保存（`save_memory`），按消息发送者隔离记忆实体，并支持每轮对话异步自动沉淀。
 
 ---
 
@@ -759,11 +760,11 @@ python3 /app/scripts/bailian-memory.py delete --node-id node_abc
 
 ```
 .
-├── client.py               # OTSMemoryClient：OTS V4 签名计算与 SearchMemories / AddMemories 请求
-├── main.py                 # 插件主入口：OTSMemoryPlugin(Star)、两个 LLM 工具、auto_record 钩子
+├── client.py               # BailianMemoryClient：记忆库 REST 调用、重试与错误脱敏
+├── main.py                 # 插件主入口：BailianMemoryPlugin(Star)、两个 LLM 工具、auto_record 钩子
 ├── __init__.py             # 包入口（插件目录名即包名）
 ├── metadata.yaml           # 插件元数据（name/display_name/version/author/repo 等）
-├── _conf_schema.json       # AstrBot 配置 schema（endpoint/instance_name/AK/SK/app_id 等）
+├── _conf_schema.json       # AstrBot 配置 schema（百炼 API Key / 记忆库 / 检索参数等）
 ├── pyproject.toml          # 工具配置（pytest / coverage / mypy），非打包元数据
 ├── codecov.yml             # Codecov 覆盖率口径与门禁配置
 ├── requirements.txt        # 核心依赖（aiohttp）
@@ -774,7 +775,7 @@ python3 /app/scripts/bailian-memory.py delete --node-id node_abc
 ├── install_gpg_keys.sh     # GPG 签名环境自动化配置脚本
 ├── CODE_OF_CONDUCT.md      # 贡献者行为准则（面向人的社区规范）
 ├── AGENTS.md               # 本文件：Agent / 人的协作规范
-├── .cnb.yml                # CNB 流水线配置
+├── .cnb.yml                # CNB 流水线（PR 门禁 + 覆盖率上报 + main 镜像同步）
 ├── .pre-commit-config.yaml # pre-commit 代码规范校验配置
 └── README.md               # 插件说明文档
 ```
@@ -788,8 +789,14 @@ python3 /app/scripts/bailian-memory.py delete --node-id node_abc
    - 拒绝传统方案中“每次请求无脑召回并塞满上下文”的做法，最大化节省 Token 与延迟。
 
 2. **主动与被动记忆沉淀**：
-   - **主动沉淀**：暴露 `save_memory(fact)` 工具，模型可将用户偏好、重要事实主动沉淀入库；
-   - **自动沉淀**：`on_decorating_result` 事件钩子捕获完整对话，后台异步调用 `AddMemories` 提交对话内容进行沉淀。
+   - **主动沉淀**：暴露 `save_memory(fact)` 工具，模型可将用户偏好、重要事实主动沉淀入库（`custom_content`）；
+   - **自动沉淀**：`on_decorating_result` 事件钩子捕获完整对话，后台异步调用 `add` 提交 `messages` 进行沉淀。
 
-3. **阿里云 OTS V4 签名**：
-   - 在 `client.py` 中完整实现原生 OTS V4 签名算法（基于 HMAC-SHA256、Canonical Request、Authorization Header 生成），无需安装庞大的 SDK，轻量高效。
+3. **按用户隔离**：
+   - `_build_user_id(event)` 使用「平台适配器 ID + 发送者 ID」构造百炼 `user_id`；
+   - 超过 64 字符上限时改用 `astrbot_<sha256 前 56 位>`，保证稳定且不碰撞。
+
+4. **百炼记忆库 REST**：
+   - `client.py` 通过 `aiohttp` 调用 `/add` 与 `/memory_nodes/search`，Bearer 鉴权；
+   - 检索固定携带 `rewrite` / `rerank` / `plan_version`，`min_score > 0` 才下发 `similarity_threshold`；
+   - 429 / 5xx 采用 1s / 2s / 4s 指数退避，4xx（非限流）快速失败。

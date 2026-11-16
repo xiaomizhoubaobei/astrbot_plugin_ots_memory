@@ -5,7 +5,7 @@
 
 > 先说三件比代码更要紧的事：
 > 1. 本插件保管的是用户的**长期记忆**，数据安全是不可让渡的底线；
-> 2. 涉密信息（AccessKey、Token、私钥）**绝不**入代码、入日志、入 Issue / PR；
+> 2. 涉密信息（API Key、Token、私钥）**绝不**入代码、入日志、入 Issue / PR；
 > 3. 参与即视为同意遵守 [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)，它写了本项目的专项约定。
 
 ## 目录
@@ -69,8 +69,8 @@ pip install pre-commit                    # 提交前自检（见「代码规范
 
 ```
 .
-├── main.py               # 插件入口：OTSMemoryPlugin、两个 LLM 工具、auto_record 钩子
-├── client.py             # OTSMemoryClient：自研 OTS V4 签名 + SearchMemories / AddMemories
+├── main.py               # 插件入口：BailianMemoryPlugin、两个 LLM 工具、auto_record 钩子
+├── client.py             # BailianMemoryClient：记忆库 REST 调用与错误脱敏
 ├── _conf_schema.json     # AstrBot 配置 schema
 ├── metadata.yaml         # 插件元数据（version / category / tags 等）
 ├── tests/                # 单测与覆盖率启动器（python -m tests.run_coverage）
@@ -115,19 +115,19 @@ pre-commit 用**当前运行 `pre-commit` 的那个系统 Python** 创建隔离�
 
 - **类型注解**：函数与关键变量必须标注，能写具体类型就别用 `Any`（`mypy` 会看）。
 - **中文注释**：核心逻辑（控制流、并发调度）、关键阈值（`top_k` / `min_score` 取值边界）、
-  正则与签名逻辑必须写明「为什么」，不是复述「做了什么」。
+  正则与鉴权/请求逻辑必须写明「为什么」，不是复述「做了什么」。
 - **错误与日志**：所有 `async` 调用都要有 `try/except`，异常不得逃逸到对话链；
   统一用项目 `logger`，**禁止** `print()` 打业务日志；日志只留非敏感字段。
 - **上游错误契约**：非 2xx 一律转中文 `RuntimeError`，文本只承载 `status` 与截断后的
-  `x-ots-requestid`（≤64 字符），**不夹带响应体**；工具层返回固定中文提示，不回显堆栈。
-- **签名不重写**：`client.py` 的 OTS V4 签名（HMAC-SHA256 + Canonical Request）不要为了
-  「省事」引入庞大 SDK，也不要改成非标准实现。
+  `request_id`（≤64 字符），**不夹带响应体**；工具层返回固定中文提示，不回显堆栈。
+- **REST 不重写**：`client.py` 直接调用百炼记忆库 REST API，不要为了「省事」引入庞大 SDK。
+- **按用户隔离**：记忆实体 `user_id` 必须由消息事件构造，禁止退化成全局共享实体。
 
 ## 测试与覆盖率
 
 ```bash
 python -m tests.run_coverage              # 跑 tests + 打印报告 + 写 coverage.xml
-python -m tests.run_coverage -- -k signing   # ``--`` 之后透传给 pytest
+python -m tests.run_coverage -- -k payload   # ``--`` 之后透传给 pytest
 pytest tests -q                          # 只跑测试
 ```
 
@@ -153,7 +153,7 @@ pytest tests -q                          # 只跑测试
 `subject` 不超过 50 字，**禁止**全英文描述。
 
 ```
-✅ feat(main): 为 recall_memory 增加按 app_id 的命名空间过滤
+✅ feat(main): 为 recall_memory 增加按 user_id 的记忆实体过滤
 ✅ fix(client): 错误信息不再携带上游响应体
 ❌ fix: increase debounce timeout to 10 mins
 ❌ update main.py

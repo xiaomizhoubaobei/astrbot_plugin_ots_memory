@@ -1,12 +1,13 @@
 <div align="center">
 
-<img src="logo.png" alt="Tablestore 长期记忆" width="180" />
+<img src="logo.png" alt="百炼长期记忆" width="180" />
 
 # astrbot_plugin_ots_memory
 
-**给 AstrBot 装上「不会忘事」的长期记忆——数据落在阿里云表格存储 Memory Store**
+**给 AstrBot 装上「不会忘事」的长期记忆——数据落在阿里云百炼记忆库**
 
 [![Coverage](https://codecov.io/gh/xiaomizhoubaobei/astrbot_plugin_ots_memory/graph/badge.svg)](https://codecov.io/gh/xiaomizhoubaobei/astrbot_plugin_ots_memory)
+[![CNB Coverage](https://cnb.cool/XMZZUZHI/Astrbot/astrbot_plugin_ots_memory/-/badge/git/latest/testing/unit/coverage)](https://cnb.cool/XMZZUZHI/Astrbot/astrbot_plugin_ots_memory)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 ![AstrBot](https://img.shields.io/badge/AstrBot-%3E%3D4.0.0-6a5acd.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-3776ab.svg)
@@ -19,18 +20,19 @@
 
 AstrBot 的记忆默认属于「上下文窗口」——窗口一滑，人也就被忘了。
 
-本插件把记忆搬进 **阿里云表格存储（Tablestore）Memory Store**：模型可以主动检索旧的念想、
-主动写下新的事实，每轮对话结束后还能在后台悄悄沉淀。写入与检索都走原生异步请求，
-不额外引入 CLI 或 Node.js 依赖。
+本插件把记忆搬进 **阿里云百炼（Model Studio）记忆库**：模型可以按需检索旧的念想、
+主动写下新的事实，每轮对话结束后还能在后台悄悄沉淀。百炼原生负责人工智能事实提取、
+语义检索与用户画像，插件侧不再需要自建向量表、索引或提取流。
 
 ## 特性
 
+- **按用户隔离**：以「平台适配器 ID + 消息发送者 ID」作为记忆实体，不同用户的记忆互不串台
+- **事实记忆 + 用户画像**：可选配置画像模板，由百炼自动提取用户特征
 - **按需召回**：`recall_memory` 工具交给模型自己判断何时调用，不做无脑注入，省 Token 也省延迟
 - **主动记录**：`save_memory` 工具，模型遇到用户偏好、约定、重要事实时一键落库
-- **自动沉淀**：`auto_record` 开启后，每轮对话异步投递 `AddMemories`，失败只告警不打扰对话
-- **空间隔离**：基于 `app_id` 命名空间划分，支持跨会话记忆与多应用隔离
-- **纯异步实现**：`aiohttp` + 自研 OTS V4 签名（HMAC-SHA256），不依赖庞大的 SDK
+- **自动沉淀**：`auto_record` 开启后，每轮对话异步投递 `messages`，失败只告警不打扰对话
 - **失败即降级**：配置不全时插件只警告不崩溃，工具返回可读的中文错误，不外抛堆栈
+- **纯异步实现**：`aiohttp` + 原生 REST 调用，不依赖庞大的 SDK
 
 ## 安装
 
@@ -38,7 +40,7 @@ AstrBot 的记忆默认属于「上下文窗口」——窗口一滑，人也就
 
 ### 快捷安装（推荐）
 
-- **插件市场**：在 AstrBot Web 管理面板进入「插件市场」，搜索 `Tablestore 长期记忆`，点击一键安装。
+- **插件市场**：在 AstrBot Web 管理面板进入「插件市场」，搜索 `百炼长期记忆`，点击一键安装。
 - **指令安装**：在任意已配置的管理会话中发送：
   ```text
   /plugin get https://github.com/xiaomizhoubaobei/astrbot_plugin_ots_memory
@@ -61,16 +63,15 @@ AstrBot 的记忆默认属于「上下文窗口」——窗口一滑，人也就
 
 ## 前置条件
 
-在 [阿里云表格存储控制台](https://otsconsole.aliyun.com/) 创建实例（按量付费/CU模式）并开通 Memory Store，
-或使用 `tablestore-agent-cli` 命令行快速创建：
+在阿里云百炼控制台创建 **API Key**，并确认已开通记忆库能力：
 
-```bash
-tablestore-agent-cli memory create --name huawu_memory
-```
+- API Key 用于 Bearer 鉴权，建议使用仅授予记忆库权限的子账号 Key；
+- `memory_library_id` 可选，留空使用服务端默认记忆库；
+- `profile_schema` 可选，填写画像模板 ID 后才会提取用户画像；
+- 若使用业务空间专属域名（形如 `https://<workspaceId>.cn-beijing.maas.aliyuncs.com/api/v2/apps/memory`），
+  通过 `api_base_url` 覆盖默认接入点。
 
-> **提示（免手动建表）**：控制台创建好实例与 Memory Store 后，无需手动创建底层数据表或二级索引。插件运行时会通过 Tablestore Memory Store API 自动管理记忆落库与检索。
-
-> **安全建议**：建议使用仅授予当前 Tablestore 实例/Memory Store 操作权限的 RAM 子账号 AccessKey，避免直接使用阿里云主账号 AK。
+> **安全建议**：API Key 只填写在 AstrBot 插件配置中，不要提交到仓库、写入日志或贴到 Issue。
 
 ## 配置
 
@@ -78,33 +79,35 @@ tablestore-agent-cli memory create --name huawu_memory
 
 | 字段 | 说明 | 默认值 |
 | --- | --- | --- |
-| `endpoint` | Tablestore 实例地址 | 空（必填） |
-| `instance_name` | 实例名称 | 空（必填） |
-| `region` | 地域 | `cn-shanghai` |
-| `access_key_id` | 阿里云 AccessKey ID | 空（必填） |
-| `access_key_secret` | 阿里云 AccessKey Secret | 空（必填） |
-| `memory_store_name` | Memory Store 名称 | `huawu_memory` |
-| `app_id` | Scope App ID（记忆隔离命名空间） | `astrbot` |
-| `top_k` | 每次检索返回的记忆条数上限（1–20） | `5` |
-| `min_score` | 最低相关度阈值（0.0–1.0），0 表示不过滤 | `0.4` |
+| `dashscope_api_key` | 百炼 API Key（必填） | 空 |
+| `api_base_url` | 记忆库服务地址 | `https://dashscope.aliyuncs.com/api/v2/apps/memory` |
+| `memory_library_id` | 记忆库 ID，留空使用默认库 | 空 |
+| `profile_schema` | 用户画像模板 ID，留空不提取画像 | 空 |
+| `project_id` | 事实记忆规则 ID，留空使用默认规则 | 空 |
+| `top_k` | 每次检索返回的记忆条数上限（1–100） | `5` |
+| `min_score` | 最低相似度阈值（0.0–1.0），0 表示不过滤 | `0.6` |
+| `rewrite` | 是否改写查询以提升准确率 | `true` |
+| `rerank` | 是否对结果做 Rerank 二次精排 | `true` |
+| `plan_version` | 检索规格：`Pro` / `Lite` | `Pro` |
 | `auto_record` | 是否在每轮对话后自动沉淀 | `true` |
 
-> `endpoint` / `instance_name` / `access_key_id` / `access_key_secret` 四项缺任一项，
-> 插件会记录一条警告并停用自身（不注册工具），补齐后重启即可恢复。
+> `dashscope_api_key` 与 `api_base_url` 缺任一项，插件会记录一条警告并停用自身
+> （不注册工具），补齐后重启即可恢复。
 
 示例：
 
 ```json
 {
-  "endpoint": "https://Bot.cn-shanghai.tablestore.aliyuncs.com",
-  "instance_name": "Bot",
-  "region": "cn-shanghai",
-  "access_key_id": "LTAI5t...",
-  "access_key_secret": "******",
-  "memory_store_name": "huawu_memory",
-  "app_id": "astrbot",
+  "dashscope_api_key": "sk-******",
+  "api_base_url": "https://dashscope.aliyuncs.com/api/v2/apps/memory",
+  "memory_library_id": "your_memory_library_id",
+  "profile_schema": "",
+  "project_id": "",
   "top_k": 5,
-  "min_score": 0.4,
+  "min_score": 0.6,
+  "rewrite": true,
+  "rerank": true,
+  "plan_version": "Pro",
   "auto_record": true
 }
 ```
@@ -124,33 +127,36 @@ tablestore-agent-cli memory create --name huawu_memory
 
 ## 方案对比
 
-| 维度 | 传统全量/前置检索记忆 (如常见向量库方案) | Tablestore Memory Store (本插件) |
+| 维度 | 本地向量库 / 传统记忆方案 | 百炼记忆库（本插件） |
 | --- | --- | --- |
 | **召回机制** | 每轮对话前无脑检索，强行注入 Context | **Tool 按需调用**，模型按需自主检索，零上下文污染 |
 | **Token 消耗** | 极高（每次无论用不用都塞满提示词） | **极低**（仅在触发 Tool 时消费少量上下文） |
-| **存储扩展性** | 本地 SQLite / JSON / Chroma，数据量大后易膨胀变慢 | **云原生盘古底座**，百万并发无感扩容，容量无上限 |
-| **环境依赖** | 需要本地额外起向量库/安装复杂 Python C 扩展 | **零额外笨重依赖**，原生 aiohttp + HMAC-SHA256 签名 |
-| **模型智商影响** | 易被大量无关前情稀释注意力，产生幻觉或越聊越呆 | **极高专注度**，上下文保持干净，逻辑更聚焦 |
+| **记忆结构** | 自己维护向量表与提取管线 | **原生事实记忆 + 用户画像**，百炼负责提取与检索 |
+| **运维成本** | 本地数据库 / 向量索引，容量与备份自行负责 | **托管服务**，按调用计费，无需自建实例 |
+| **用户隔离** | 需自行设计命名空间 | 以发送者 ID 作为记忆实体，天然按用户隔离 |
+| **环境依赖** | 需本地向量库与额外 Python 扩展 | **零额外笨重依赖**，原生 aiohttp |
 
 ## 工作原理
 
 ```
-用户消息
+用户消息（带 platform_id / sender_id）
     │
     ▼
 LLM 推理（携带 recall_memory / save_memory 工具定义）
     │
-    ├─ 需要回忆时  → recall_memory(query) → SearchMemories → 结果以「[相关度 0.xx] 文本」注入上下文
+    ├─ 需要回忆时  → recall_memory(query) → POST /memory_nodes/search
+    │                                      → 结果以「记忆文本」注入上下文
     │
-    └─ 遇到重要信息 → save_memory(fact)    → AddMemories（userMemories）
+    └─ 遇到重要信息 → save_memory(fact)    → POST /add（custom_content）
 
-对话结束后 → auto_record=true → 本轮 user/assistant 消息异步投递 AddMemories
+对话结束后 → auto_record=true → 本轮 user/assistant 消息异步投递 POST /add（messages）
 ```
 
 细节：
 
-- 检索走 `SearchMemories`，固定开启 `enableRerank`；`min_score > 0` 时才下发 `thresholds.minScore`
-- 自动沉淀只取回复链第一段文本作为 assistant 内容，且必须在有用户文本时才投递
+- 记忆实体 `user_id` 由「平台适配器 ID + 发送者 ID」组成；超过百炼 64 字符上限时改用稳定哈希
+- 检索固定携带 `rewrite` / `rerank` / `plan_version`；`min_score > 0` 时才下发 `similarity_threshold`
+- 自动沉淀只取回复链第一段文本作为 assistant 内容，且必须在有用户文本时才投递；消息超过 50 条时保留最近部分
 - 后台沉淀任务用 `asyncio.create_task` 脱离请求链，异常仅 `warning` 记录
 
 ## 开发
@@ -172,8 +178,8 @@ python -m tests.run_coverage              # 跑单测并生成 coverage.xml
 
 ```
 .
-├── main.py               # 插件入口：OTSMemoryPlugin、两个 LLM 工具、自动沉淀钩子
-├── client.py             # OTSMemoryClient：OTS V4 签名 + SearchMemories / AddMemories
+├── main.py               # 插件入口：BailianMemoryPlugin、两个 LLM 工具、自动沉淀钩子
+├── client.py             # BailianMemoryClient：记忆库 REST 调用与错误脱敏
 ├── _conf_schema.json     # 配置 schema
 ├── metadata.yaml         # 插件元数据（版本、分类、标签）
 ├── tests/                # 单测与覆盖率启动器（python -m tests.run_coverage）
@@ -202,6 +208,7 @@ pydocstyle 等钩子，详见 [`.pre-commit-config.yaml`](.pre-commit-config.yam
 ## 持续集成
 
 - **覆盖率**：GitHub Actions [`.github/workflows/coverage.yml`](.github/workflows/coverage.yml) 出报告并上报 Codecov（徽章见顶部）
+- **CNB PR 门禁**：`.cnb.yml` 在 PR 事件运行 pre-commit、单测与覆盖率上报，覆盖率徽章由 CNB 生成
 - **发布**：`.github/workflows/release.yml` 依据 `metadata.yaml` 的 `version` 打 tag 并构建 Release
 - **安全扫描**：CodeQL、依赖审计、secret-scanning、Scorecard、tfsec 等工作流
 - **安全策略**：支持范围、漏洞报告渠道与安全实践见 [`SECURITY.md`](SECURITY.md)
@@ -234,10 +241,12 @@ astrbot_plugin_ots_memory/
 
 | 现象 | 原因与处理 |
 | --- | --- |
-| 日志出现「配置不完整，插件功能已禁用」 | 四个必填项有缺失，补齐后重启 |
-| 工具返回「OTS 记忆插件客户端未初始化」 | 同上，客户端未构造成功 |
-| 工具返回「检索记忆失败，请稍后重试。」 | 上游返回非 2xx。工具层只给固定中文提示，**不回显上游响应体**；具体原因看插件日志里的 `status` 与 `request_id`（`request_id` 截断至 64 字符），据此查 OTS 侧（鉴权 / 实例名 / 网络） |
-| 徽章长期灰色 | 仓库为 GitHub 镜像，需在 Codecov 侧完成仓库授权 |
+| 日志出现「配置不完整，插件功能已禁用」 | `dashscope_api_key` 或 `api_base_url` 为空，补齐后重启 |
+| 工具返回「记忆插件客户端未初始化」 | 同上，客户端未构造成功 |
+| 工具返回「无法确定当前用户」 | 当前消息事件拿不到发送者 ID，检查平台适配器是否提供 sender |
+| 工具返回「检索记忆失败，请稍后重试。」 | 上游返回非 2xx。工具层只给固定中文提示，**不回显上游响应体**；具体原因看插件日志里的 `status` 与 `request_id`（截断至 64 字符） |
+| 徽章长期灰色 | GitHub 侧仓库为镜像，需在 Codecov 完成授权；CNB 徽章需先跑过一次覆盖率上报 |
+| 从 0.0.1 升级后配置项不认 | 本版本已移除 OTS 配置，按上表改填百炼 API Key 与记忆库参数 |
 
 ## 参与贡献
 
