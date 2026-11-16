@@ -155,7 +155,7 @@ LLM 推理（携带 recall_memory / save_memory 工具定义）
 细节：
 
 - 记忆实体 `user_id` 由「平台适配器 ID + 发送者 ID」组成；超过百炼 64 字符上限时改用稳定哈希
-- 检索固定携带 `rewrite` / `rerank` / `plan_version`；`min_score > 0` 时才下发 `similarity_threshold`
+- 检索把 `query` 包装成一条 user 消息放进 `messages`（dashscope 接入点要求），并携带 `rewrite` / `rerank` / `plan_version`；`min_score > 0` 时才下发 `similarity_threshold`
 - 自动沉淀只取回复链第一段文本作为 assistant 内容，且必须在有用户文本时才投递；消息超过 50 条时保留最近部分
 - 后台沉淀任务用 `asyncio.create_task` 脱离请求链，异常仅 `warning` 记录
 

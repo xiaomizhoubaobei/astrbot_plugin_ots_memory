@@ -70,7 +70,7 @@ AstrBot 对话
 
 - **初始化与停用**：`BailianMemoryPlugin.__init__` 检查 `dashscope_api_key` 与 `api_base_url`。缺任一项 → `client = None`、打 `warning`、**不注册任何工具**；齐全才构造客户端并 `context.add_llm_tools(...)`。
 - **按用户隔离**：`_build_user_id(event)` 用「`get_platform_id()` + `get_sender_id()`」构造 `user_id`；超过 64 字符时改用 `astrbot_<sha256 前 56 位>`。工具与自动沉淀都从这里取实体，不能退化成全局共享。
-- **检索参数**：`top_k` / `min_score` / `rewrite` / `rerank` / `plan_version` 来自配置；仅当 `min_score > 0` 才下发 `similarity_threshold`。
+- **检索参数**：`top_k` / `min_score` / `rewrite` / `rerank` / `plan_version` 来自配置；`query` 会被包装成一条 user 消息放进 `messages`（dashscope 接入点要求该字段），仅当 `min_score > 0` 才下发 `similarity_threshold`。
 - **自动沉淀**：用户消息取 `event.get_messages()` 的所有非空文本段；assistant 内容只取回复链 `result.chain` 的**第一段**文本。消息超过百炼 50 条上限时保留最近部分。后台任务异常只 `warning`，不向对话链逃逸。
 - **请求与重试**：`_request` 使用 Bearer 鉴权与 `allow_redirects=False`；429 / 5xx 按 1s / 2s / 4s 退避（最多 4 次尝试），其它 4xx 快速失败。不要为省事引入百炼 SDK。
 - **错误脱敏**：非 2xx 统一抛中文 `RuntimeError`，文本只含 `status` 与截断到 64 字符的 `request_id`；响应体既不进异常也不进日志。

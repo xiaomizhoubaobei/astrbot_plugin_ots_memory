@@ -798,5 +798,6 @@ python3 /app/scripts/bailian-memory.py delete --node-id node_abc
 
 4. **百炼记忆库 REST**：
    - `client.py` 通过 `aiohttp` 调用 `/add` 与 `/memory_nodes/search`，Bearer 鉴权；
+   - 实测 dashscope 接入点的搜索接口要求 `messages` 字段，客户端把 `query` 包装成一条 user 消息下发；
    - 检索固定携带 `rewrite` / `rerank` / `plan_version`，`min_score > 0` 才下发 `similarity_threshold`；
    - 429 / 5xx 采用 1s / 2s / 4s 指数退避，4xx（非限流）快速失败。

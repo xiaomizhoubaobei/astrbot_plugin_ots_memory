@@ -139,7 +139,7 @@ async def test_search_memories_builds_expected_payload(fake_aiohttp) -> None:
     sent = json.loads(fake_aiohttp.captured[0]["data"])
     assert sent == {
         "user_id": "user-1",
-        "query": "hello",
+        "messages": [{"role": "user", "content": "hello"}],
         "max_results": 3,
         "rewrite": True,
         "rerank": True,
@@ -147,6 +147,7 @@ async def test_search_memories_builds_expected_payload(fake_aiohttp) -> None:
         "similarity_threshold": 0.5,
         "memory_library_id": "lib-1",
     }
+    assert "query" not in sent
     assert fake_aiohttp.captured[0]["url"] == (
         "https://example.com/api/v2/apps/memory/memory_nodes/search"
     )

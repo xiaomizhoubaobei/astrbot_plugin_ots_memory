@@ -177,7 +177,7 @@ class BailianMemoryClient:
 
         Args:
             user_id: 记忆实体 ID（最大 64 字符）.
-            query: 检索语句.
+            query: 检索语句；客户端会包装成一条 user 消息发送.
             top_k: 最大返回条数（1~100）.
             min_score: 相似度阈值（0.0~1.0）；0 表示不下发阈值.
             rewrite: 是否改写查询.
@@ -205,7 +205,9 @@ class BailianMemoryClient:
 
         payload: Dict[str, Any] = {
             "user_id": entity_id,
-            "query": query_text,
+            # 实测百炼 dashscope 接入点的搜索接口要求 messages 字段（直接下发
+            # query 会返回 400 InvalidParameter），这里把查询包装成一条 user 消息。
+            "messages": [{"role": "user", "content": query_text}],
             "max_results": top_k,
             "rewrite": rewrite,
             "rerank": rerank,
