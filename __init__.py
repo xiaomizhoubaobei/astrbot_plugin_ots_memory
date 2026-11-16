@@ -1,1 +1,1 @@
-"""Tablestore Agent Memory Plugin for AstrBot."""
+"""Bailian Memory Plugin for AstrBot."""

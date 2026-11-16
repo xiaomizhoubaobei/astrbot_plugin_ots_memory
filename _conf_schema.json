@@ -1,57 +1,63 @@
 {
-  "endpoint": {
+  "dashscope_api_key": {
     "type": "string",
-    "description": "Tablestore Endpoint",
-    "hint": "表格存储实例公网或内网地址，如 https://Bot.cn-shanghai.tablestore.aliyuncs.com",
+    "description": "百炼 API Key",
+    "hint": "阿里云百炼（Model Studio）API Key，用于 Bearer 鉴权；请妥善保管，不要泄露",
     "default": ""
   },
-  "instance_name": {
+  "api_base_url": {
     "type": "string",
-    "description": "实例名称",
-    "hint": "Tablestore 实例名称",
+    "description": "记忆库服务地址",
+    "hint": "默认 https://dashscope.aliyuncs.com/api/v2/apps/memory；使用业务空间专属域名时可覆盖",
+    "default": "https://dashscope.aliyuncs.com/api/v2/apps/memory"
+  },
+  "memory_library_id": {
+    "type": "string",
+    "description": "记忆库 ID",
+    "hint": "留空使用服务端默认记忆库；也可填写控制台创建的 Memory Library ID",
     "default": ""
   },
-  "region": {
+  "profile_schema": {
     "type": "string",
-    "description": "地域",
-    "hint": "实例所在地域，如 cn-shanghai、cn-beijing",
-    "default": "cn-shanghai"
-  },
-  "access_key_id": {
-    "type": "string",
-    "description": "AccessKey ID",
-    "hint": "阿里云账号或 RAM 用户的 AccessKey ID",
+    "description": "用户画像模板 ID",
+    "hint": "留空则只写入事实记忆，不提取用户画像",
     "default": ""
   },
-  "access_key_secret": {
+  "project_id": {
     "type": "string",
-    "description": "AccessKey Secret",
-    "hint": "阿里云账号或 RAM 用户的 AccessKey Secret",
+    "description": "事实记忆规则 ID",
+    "hint": "留空使用默认规则",
     "default": ""
-  },
-  "memory_store_name": {
-    "type": "string",
-    "description": "Memory Store 名称",
-    "hint": "在 Tablestore 控制台或 CLI 中创建的记忆库名称",
-    "default": "huawu_memory"
-  },
-  "app_id": {
-    "type": "string",
-    "description": "Scope App ID",
-    "hint": "记忆隔离的命名空间 App ID",
-    "default": "astrbot"
   },
   "top_k": {
     "type": "int",
     "description": "检索条数",
-    "hint": "每次对话检索的相关记忆条数上限 (1-20)",
+    "hint": "每次检索返回的记忆条数上限 (1-100)",
     "default": 5
   },
   "min_score": {
     "type": "float",
     "description": "最低相关度分数",
-    "hint": "过滤低相关度记忆的阈值 (0.0 - 1.0)",
-    "default": 0.4
+    "hint": "过滤低相关度记忆的阈值 (0.0-1.0)，0 表示不过滤；建议 0.5-0.7",
+    "default": 0.6
+  },
+  "rewrite": {
+    "type": "bool",
+    "description": "查询改写",
+    "hint": "是否让百炼改写查询以提升检索准确率",
+    "default": true
+  },
+  "rerank": {
+    "type": "bool",
+    "description": "结果重排",
+    "hint": "是否对检索结果做 Rerank 二次精排",
+    "default": true
+  },
+  "plan_version": {
+    "type": "string",
+    "description": "检索规格",
+    "hint": "Pro（默认，含 Rerank）或 Lite（成本更低）",
+    "default": "Pro"
   },
   "auto_record": {
     "type": "bool",
