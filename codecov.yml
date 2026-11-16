@@ -1,6 +1,6 @@
 # Codecov 配置：覆盖率报告口径与门禁策略
-# 说明：本项目覆盖率由 .github/workflows/coverage.yml 产出 coverage.xml 后上报，
-#       CNB 侧的测试与覆盖率上报（testing:coverage）已移除，Codecov 为唯一覆盖率来源。
+# 说明：本项目覆盖率由 .github/workflows/coverage.yml 产出 coverage.xml 后上报 Codecov；
+#       CNB 侧另有独立的 testing:coverage 上报与徽章，两者互不替代。
 
 coverage:
   precision: 2
@@ -25,8 +25,8 @@ coverage:
 # 路径口径：CI 用 `python -m tests.run_coverage`，其 --source 传包名，SF 仍写成
 # 相对检出根的 `client.py` / `main.py`，故此处无需再加包名前缀。
 # 排除口径分两层，互不替代：pyproject.toml 的 coverage.report.omit 决定**算不算**
-# （tests/ 与 ai-audit/），本文件的 ignore 只决定**上传后显示哪些**（仅 tests/ 与
-# 安装脚本，ai-audit/ 不在此处重复配置）；Codecov 的 ignore 管不到本地裸跑。
+# （tests/、ai-audit/ 与 scripts/），本文件的 ignore 只决定**上传后显示哪些**（tests/、
+# scripts/ 与安装脚本；ai-audit/ 不在此处重复配置）；Codecov 的 ignore 管不到本地裸跑。
 flags:
   unittests:
     paths:
@@ -37,6 +37,7 @@ flags:
 # 忽略非业务代码，避免拉低口径
 ignore:
   - "tests/"
+  - "scripts/"
   - "install_gpg_keys.sh"
 
 comment:

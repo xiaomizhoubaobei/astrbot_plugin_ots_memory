@@ -31,7 +31,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 _XML_PATH = _REPO_ROOT / "coverage.xml"
 # 与 pyproject.toml 的 coverage.report.omit 口径一致（此处不读配置文件，
 # 免得 CI 与本地因配置文件位置差异而漂移）
-_OMIT = ["tests/*", "ai-audit/*"]
+_OMIT = ["tests/*", "ai-audit/*", "scripts/*"]
 # pytest 侧透传参数：``--`` 之后原样交给 pytest
 _PYTEST_ARGS = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else ["tests"]
 
