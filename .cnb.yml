@@ -97,11 +97,20 @@ main:
                     - pip install pre-commit
                     - pre-commit run --all-files
             - name: 单元测试与覆盖率
+              # 整段放在同一个 script 块里，避免 CNB 用 && 拼接数组项时
+              # 把多行内容与后续命令拼坏（同「安装宿主」阶段的坑）。
               script:
-                    - python -m tests.run_coverage
-                    # testing:coverage 不支持 coverage.py 的 XML，改由 lcov 格式上报。
-                    # coverage>=7 支持该子命令，沿用 pyproject 的 source/omit 口径。
-                    - coverage lcov -o lcov.info
+                    - |
+                      set -e
+                      python -m tests.run_coverage
+                      # testing:coverage 不支持 coverage.py 的 XML，改由 lcov 上报；
+                      # coverage>=7 支持该子命令，沿用 pyproject 的 source/omit 口径。
+                      coverage lcov -o lcov.info
+                      # testing:coverage 要求每条记录都带 LF/LH；coverage.py 会为零语句
+                      # 文件（如 __init__.py）输出不带 LF 的空记录，导致汇总变 NaN。
+                      # 按 end_of_record 拆分，只保留含 LF 的记录。
+                      awk 'BEGIN { RS="end_of_record"; ORS="end_of_record\n" } /LF:/ { print }' lcov.info > lcov.filtered.info
+                      mv lcov.filtered.info lcov.info
             - name: 上报单测覆盖率
               type: testing:coverage
               options:
