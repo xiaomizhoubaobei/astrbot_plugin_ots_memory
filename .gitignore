@@ -9,6 +9,7 @@ __pycache__/
 # 测试/覆盖率产物
 .coverage
 coverage.xml
+lcov.info
 
 # AstrBot 宿主运行时数据（CLI 启动会生成，非本仓库内容）
 data/

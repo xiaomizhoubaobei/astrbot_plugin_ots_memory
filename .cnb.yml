@@ -99,6 +99,15 @@ main:
             - name: 单元测试与覆盖率
               script:
                     - python -m tests.run_coverage
+                    # testing:coverage 不支持 coverage.py 的 XML，改由 lcov 格式上报。
+                    # coverage>=7 支持该子命令，沿用 pyproject 的 source/omit 口径。
+                    - coverage lcov -o lcov.info
+            - name: 上报单测覆盖率
+              type: testing:coverage
+              options:
+                    pattern: lcov.info
+                    # 报告缺失说明上游步骤没产出，直接失败，避免「静默不上报」。
+                    breakIfNoCoverage: true
       # push 到 main：只把代码同步到 GitHub 镜像仓库。
       # 单测覆盖率、Release 与插件 zip 打包统一由 GitHub Actions 产出
       # （.github/workflows/coverage.yml、release.yml），CNB 不再重复构建 zip。
