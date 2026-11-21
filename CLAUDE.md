@@ -131,7 +131,7 @@ AstrBot 对话
 
 ### 覆盖率口径
 
-- 分母排除 `tests/*` 与 `ai-audit/*`（`pyproject.toml` 的 `omit` 与 `run_coverage.py` 的 `_OMIT` 两处）。
+- 分母排除 `tests/*`、`ai-audit/*` 与 `.claude/skills/*/scripts/*`（`pyproject.toml` 的 `omit` 与 `run_coverage.py` 的 `_OMIT` 两处）；根目录 `scripts/*` 仍保留给运行时下载的工具脚本。
 - Codecov 门槛是提示性的（`codecov.yml` 中 `informational: true`），不卡 PR，但新增业务代码应尽量带测试。
 
 ## CI / 发布

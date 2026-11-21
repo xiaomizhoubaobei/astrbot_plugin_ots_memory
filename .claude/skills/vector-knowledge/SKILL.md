@@ -12,7 +12,7 @@ description: 读写阿里云 OSS 向量知识库（按仓库隔离）。任务�
 - Bucket：`cnb-knowledge-base`
 - 索引：`cnbknowledge`（`cn-shanghai`，1024 维 float32，cosine）
 - 范围：**仅收纳 `XMZZUZHI/Astrbot/*` 子组织**；其他子组织不写入
-- 工具：`scripts/vector_ingest.py`（纯标准库，自实现百炼 embedding 与 OSS V4 签名）
+- 工具：`.claude/skills/vector-knowledge/scripts/vector_ingest.py`（纯标准库，自实现百炼 embedding 与 OSS V4 签名）
 
 ## 何时用
 
@@ -22,24 +22,28 @@ description: 读写阿里云 OSS 向量知识库（按仓库隔离）。任务�
 
 ## 命令
 
+以下命令均从仓库根目录执行：
+
 ```bash
+VECTOR_INGEST=.claude/skills/vector-knowledge/scripts/vector_ingest.py
+
 # 检索当前仓库（repo 默认从 origin 自动识别）
-python scripts/vector_ingest.py --query "<关键词或报错原文>" --top-k 5
+python "$VECTOR_INGEST" --query "<关键词或报错原文>" --top-k 5
 
 # 显式指定仓库
-python scripts/vector_ingest.py --repo "XMZZUZHI/Astrbot/astrbot_plugin_github_webhook" \
+python "$VECTOR_INGEST" --repo "XMZZUZHI/Astrbot/astrbot_plugin_github_webhook" \
   --query "<关键词>" --top-k 5
 
 # 写入单个文件或目录（--kind / --tag 可选）
-python scripts/vector_ingest.py --kind pitfall --tag cnb docs/05-troubleshooting.md
+python "$VECTOR_INGEST" --kind pitfall --tag cnb docs/05-troubleshooting.md
 
 # 跨仓库检索（仅在明确需要组织级复用时使用）
-python scripts/vector_ingest.py --all-repos --query "<关键词>" --top-k 5
+python "$VECTOR_INGEST" --all-repos --query "<关键词>" --top-k 5
 
 # 仓库级审计 / 清理
-python scripts/vector_ingest.py --list-repos
-python scripts/vector_ingest.py --delete --repo "<仓库标识>" --dry-run
-python scripts/vector_ingest.py --delete --repo "<仓库标识>"
+python "$VECTOR_INGEST" --list-repos
+python "$VECTOR_INGEST" --delete --repo "<仓库标识>" --dry-run
+python "$VECTOR_INGEST" --delete --repo "<仓库标识>"
 ```
 
 环境变量：`DASHSCOPE_API_KEY`、`ALIBABA_CLOUD_ACCESS_KEY_ID`、`ALIBABA_CLOUD_ACCESS_KEY_SECRET`、`OSS_VECTOR_ACCOUNT_ID`。
@@ -52,4 +56,4 @@ python scripts/vector_ingest.py --delete --repo "<仓库标识>"
 4. 写入后索引有约数十秒延迟，刚写入的内容可能暂时检索不到。
 5. 知识库是增强能力：调用失败只告警，不阻断主任务。
 6. 仓库级清理使用 `--delete --repo`，删除前必须先跑 `--dry-run` 核对数量。
-7. 详细参数、批量导入与故障排查见 `scripts/README.md`。
+7. 详细参数、批量导入与故障排查见技能目录下的 `scripts/README.md`。

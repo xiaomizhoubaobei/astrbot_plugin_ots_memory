@@ -15,8 +15,8 @@ testpaths = ["tests"]
 source = ["."]
 
 [tool.coverage.report]
-# tests、ai-audit 与 scripts（工具/示例资产，不被单测覆盖）不计入分母
-omit = ["tests/*", "ai-audit/*", "scripts/*"]
+# tests、ai-audit 与技能脚本（工具资产，不被单测覆盖）不计入分母
+omit = ["tests/*", "ai-audit/*", "scripts/*", ".claude/skills/*/scripts/*"]
 
 [tool.mypy]
 # 仓库根即包根（`__init__.py` 在根）。不声明 base 时 mypy 会把 tests/ 同时算作

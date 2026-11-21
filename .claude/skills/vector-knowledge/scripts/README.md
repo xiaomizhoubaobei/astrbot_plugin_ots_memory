@@ -1,6 +1,7 @@
 # 知识库脚本工具
 
-本目录包含维护项目向量知识库的脚本。
+本目录（`.claude/skills/vector-knowledge/scripts/`）包含维护项目向量知识库的脚本。
+以下命令均从仓库根目录执行。
 
 ## vector_ingest.py
 
@@ -29,19 +30,19 @@ export OSS_VECTOR_ACCOUNT_ID="<阿里云账号 ID>"           # 也可用 --acco
 
 ```bash
 # 1. 先看切片计划，不调用任何 API、不消耗额度
-./scripts/vector_ingest.py --dry-run docs/
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py --dry-run docs/
 
 # 2. 导入单个 Markdown / 文本文件
-./scripts/vector_ingest.py --kind pitfall --tag cnb --tag gpg docs/05-troubleshooting.md
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py --kind pitfall --tag cnb --tag gpg docs/05-troubleshooting.md
 
 # 3. 递归导入目录
-./scripts/vector_ingest.py --kind knowledge --tag cnb docs/
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py --kind knowledge --tag cnb docs/
 
 # 4. 使用内网 Endpoint（与 OSS 同地域的 ECS 上运行时）
-./scripts/vector_ingest.py --internal docs/
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py --internal docs/
 
 # 5. 自定义切片大小与批次
-./scripts/vector_ingest.py \
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py \
   --chunk-size 800 --chunk-overlap 100 \
   --embed-batch-size 10 --vector-batch-size 100 \
   docs/
@@ -59,16 +60,16 @@ export OSS_VECTOR_ACCOUNT_ID="<阿里云账号 ID>"           # 也可用 --acco
 
 ```bash
 # 显式指定仓库（自动识别失败时使用）
-./scripts/vector_ingest.py \
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py \
   --repo XMZZUZHI/Astrbot/astrbot_plugin_ots_memory docs/
 
 # 只检索当前仓库
-./scripts/vector_ingest.py \
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py \
   --repo XMZZUZHI/Astrbot/astrbot_plugin_ots_memory \
   --query "GPG unknown_key" --top-k 5
 
 # 跨仓库检索
-./scripts/vector_ingest.py --all-repos --query "GPG unknown_key" --top-k 5
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py --all-repos --query "GPG unknown_key" --top-k 5
 ```
 
 > 组织仓库数量已超过 OSS 单桶 100 个索引的上限，因此不要按仓库建索引；
@@ -78,16 +79,16 @@ export OSS_VECTOR_ACCOUNT_ID="<阿里云账号 ID>"           # 也可用 --acco
 
 ```bash
 # 列出各仓库的向量数量
-./scripts/vector_ingest.py --list-repos
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py --list-repos
 
 # 机器可读输出
-./scripts/vector_ingest.py --list-repos --json
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py --list-repos --json
 
 # 预览某仓库将被删除的向量数量（不实际删除）
-./scripts/vector_ingest.py --delete --repo XMZZUZHI/Astrbot/astrbot_plugin_ots_memory --dry-run
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py --delete --repo XMZZUZHI/Astrbot/astrbot_plugin_ots_memory --dry-run
 
 # 删除某仓库的全部向量（不可恢复）
-./scripts/vector_ingest.py --delete --repo XMZZUZHI/Astrbot/astrbot_plugin_ots_memory
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py --delete --repo XMZZUZHI/Astrbot/astrbot_plugin_ots_memory
 ```
 
 - `--list-repos` 只需要 OSS 凭证，不要求 `DASHSCOPE_API_KEY`；
@@ -98,10 +99,10 @@ export OSS_VECTOR_ACCOUNT_ID="<阿里云账号 ID>"           # 也可用 --acco
 
 ```bash
 # 语义检索，输出 key、distance 与 repo/source/title/kind 等元数据
-./scripts/vector_ingest.py --query "GPG 签名 unknown_key 怎么修" --top-k 5
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py --query "GPG 签名 unknown_key 怎么修" --top-k 5
 
 # 机器可读输出
-./scripts/vector_ingest.py --query "端口被占用" --top-k 3 --json
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py --query "端口被占用" --top-k 3 --json
 ```
 
 > 向量写入后索引更新有短暂延迟（约数十秒），刚写入的内容可能暂时检索不到。

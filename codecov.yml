@@ -25,8 +25,8 @@ coverage:
 # 路径口径：CI 用 `python -m tests.run_coverage`，其 --source 传包名，SF 仍写成
 # 相对检出根的 `client.py` / `main.py`，故此处无需再加包名前缀。
 # 排除口径分两层，互不替代：pyproject.toml 的 coverage.report.omit 决定**算不算**
-# （tests/、ai-audit/ 与 scripts/），本文件的 ignore 只决定**上传后显示哪些**（tests/、
-# scripts/ 与安装脚本；ai-audit/ 不在此处重复配置）；Codecov 的 ignore 管不到本地裸跑。
+# （tests/、ai-audit/ 与技能脚本），本文件的 ignore 只决定**上传后显示哪些**（tests/、
+# 技能脚本与安装脚本；ai-audit/ 不在此处重复配置）；Codecov 的 ignore 管不到本地裸跑。
 flags:
   unittests:
     paths:
@@ -38,6 +38,7 @@ flags:
 ignore:
   - "tests/"
   - "scripts/"
+  - ".claude/skills/*/scripts/"
   - "install_gpg_keys.sh"
 
 comment:
