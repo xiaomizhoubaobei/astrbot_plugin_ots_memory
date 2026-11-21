@@ -25,7 +25,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +53,8 @@ SUPPORTED_SUFFIXES = frozenset({".md", ".markdown", ".txt", ".jsonl"})
 _SENTENCE_BOUNDARIES = ("\n\n", "\n", "。", "！", "？", ". ", "! ", "? ")
 # 仓库标识：至少两段（owner/repo 或 org/group/repo），只允许安全字符。
 _REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+$")
+# 默认只回显 status/code/request_id；--debug 才附带响应体与 message。
+_DEBUG_ERRORS = False
 
 
 class IngestError(RuntimeError):
@@ -103,6 +105,7 @@ class IngestOptions:
     tags: list[str] = field(default_factory=list)
     dry_run: bool = False
     quiet: bool = False
+    prune: bool = False
 
 
 @dataclass(frozen=True)
@@ -257,6 +260,72 @@ def _now_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
+def _set_debug_errors(enabled: bool) -> None:
+    """设置错误信息是否包含响应体（仅 --debug 时开启）."""
+    global _DEBUG_ERRORS
+    _DEBUG_ERRORS = bool(enabled)
+
+
+def _json_error_fields(raw: bytes) -> tuple[str, str, str]:
+    """从 JSON 错误响应中提取 code / message / request_id."""
+    try:
+        data = json.loads(raw.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return "", "", ""
+    if not isinstance(data, dict):
+        return "", "", ""
+    nested = data.get("Error")
+    if isinstance(nested, dict):
+        data = nested
+    code = data.get("Code") or data.get("code") or ""
+    message = data.get("Message") or data.get("message") or ""
+    request_id = (
+        data.get("RequestId") or data.get("requestId") or data.get("request_id") or ""
+    )
+    return (str(code)[:120], str(message)[:200], str(request_id)[:64])
+
+
+def _preview_suffix(raw: bytes) -> str:
+    """返回响应体预览；默认隐藏，只有 --debug 才附带."""
+    if not _DEBUG_ERRORS:
+        return "（响应体已隐藏，加 --debug 查看）"
+    preview = raw.decode("utf-8", errors="replace")[:500]
+    return f"; 响应: {preview}" if preview else ""
+
+
+def _describe_http_error(
+    status: int,
+    raw: bytes,
+    headers: Mapping[str, str] | None = None,
+) -> str:
+    """构造脱敏后的 HTTP 错误描述.
+
+    默认只保留状态码、业务 code 与 request_id；message 与响应体只在
+    ``--debug`` 下输出，避免知识库正文被意外写进日志。
+    """
+    code, message, request_id = _json_error_fields(raw)
+    if not request_id and headers is not None:
+        request_id = (
+            headers.get("x-oss-request-id")
+            or headers.get("X-Oss-Request-Id")
+            or headers.get("x-request-id")
+            or ""
+        )
+    details = [code] if code else []
+    if _DEBUG_ERRORS and message:
+        details.append(message)
+    if request_id:
+        details.append(f"request_id={request_id[:64]}")
+    line = f"HTTP {status}"
+    if details:
+        line += ": " + " | ".join(details)
+    if _DEBUG_ERRORS:
+        preview = raw.decode("utf-8", errors="replace")[:1200]
+        if preview:
+            line += f"; 响应: {preview}"
+    return line
+
+
 def _http_request(
     request: urllib.request.Request, timeout: float, retries: int
 ) -> bytes:
@@ -274,8 +343,9 @@ def _http_request(
             ) as response:
                 return response.read()
         except urllib.error.HTTPError as error:
-            body = error.read().decode("utf-8", errors="replace")
-            last_error = f"HTTP {error.code}: {body[:1200]}"
+            body = error.read()
+            headers = dict(error.headers.items()) if error.headers else None
+            last_error = _describe_http_error(error.code, body, headers)
             if error.code in RETRYABLE_STATUS and attempt < retries:
                 time.sleep(2**attempt)
                 continue
@@ -343,8 +413,7 @@ def _oss_vector_request(
     try:
         response = json.loads(raw)
     except json.JSONDecodeError as error:
-        preview = raw.decode("utf-8", errors="replace")[:500]
-        raise IngestError(f"OSS 响应解析失败: {error}; 响应: {preview}") from error
+        raise IngestError(f"OSS 响应解析失败: {error}{_preview_suffix(raw)}") from error
     if not isinstance(response, dict):
         raise IngestError("OSS 响应不是 JSON 对象")
     return response
@@ -468,6 +537,62 @@ def delete_repo(config: OssConfig, index: str, repo: str, dry_run: bool = False)
     return delete_vectors(config, index, keys)
 
 
+def probe_index(config: OssConfig, index: str) -> None:
+    """用一次 ListVectors 探针验证 Bucket/索引可访问."""
+    response = _oss_vector_request(
+        config,
+        "listVectors",
+        {"indexName": index, "maxResults": 1, "returnMetadata": False},
+    )
+    if not isinstance(response.get("vectors"), list):
+        raise IngestError("ListVectors 响应缺少 vectors 列表")
+
+
+def prune_sources(
+    config: OssConfig,
+    index: str,
+    repo: str,
+    prefix: str,
+    keep_by_source: Mapping[str, set[str]],
+    dry_run: bool = False,
+) -> dict[str, int]:
+    """删除同来源中已不在本次写入集合里的旧切片."""
+    vectors = list_vectors(config, index, repo=repo)
+    removed: dict[str, int] = {}
+    for source, keep in keep_by_source.items():
+        source_prefix = _source_key_prefix(prefix, repo, source)
+        stale = stale_keys(vectors, source_prefix, keep)
+        if stale and not dry_run:
+            delete_vectors(config, index, stale)
+        removed[source] = len(stale)
+    return removed
+
+
+def delete_source(
+    config: OssConfig,
+    index: str,
+    repo: str,
+    prefix: str,
+    source: str,
+    dry_run: bool = False,
+) -> int:
+    """删除指定来源的默认主键向量.
+
+    自定义 JSONL ``key`` 不落在来源前缀下，因此不会被此命令删除。
+    """
+    vectors = list_vectors(config, index, repo=repo)
+    source_prefix = _source_key_prefix(prefix, repo, source)
+    keys = [
+        vector["key"]
+        for vector in vectors
+        if isinstance(vector.get("key"), str)
+        and vector["key"].startswith(source_prefix)
+    ]
+    if dry_run:
+        return len(keys)
+    return delete_vectors(config, index, keys)
+
+
 def embed_texts(options: IngestOptions, texts: Sequence[str]) -> list[list[float]]:
     """调用百炼 ``text-embedding-v4`` 生成向量，返回与输入同序的向量列表."""
     if not texts:
@@ -502,8 +627,7 @@ def embed_texts(options: IngestOptions, texts: Sequence[str]) -> list[list[float
         ordered = sorted(items, key=lambda item: int(item.get("index", 0)))
         vectors = [item["embedding"] for item in ordered]
     except (KeyError, TypeError, ValueError) as error:
-        preview = raw.decode("utf-8", errors="replace")[:500]
-        raise IngestError(f"百炼响应解析失败: {error}; 响应: {preview}") from error
+        raise IngestError(f"百炼响应解析失败: {error}{_preview_suffix(raw)}") from error
 
     if len(vectors) != len(texts):
         raise IngestError(
@@ -596,10 +720,31 @@ def _repo_key_prefix(prefix: str, repo: str) -> str:
     return f"{prefix}:{digest}" if prefix else digest
 
 
+def _source_digest(source: str) -> str:
+    """返回来源路径的稳定短哈希."""
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+
+
+def _source_key_prefix(prefix: str, repo: str, source: str) -> str:
+    """返回同一仓库、同一来源的主键前缀."""
+    return f"{_repo_key_prefix(prefix, repo)}:{_source_digest(source)}:"
+
+
 def _default_key(prefix: str, repo: str, source: str, index: int) -> str:
     """生成稳定主键：同一仓库、同一来源的第 N 片始终覆盖同一向量."""
-    source_digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
-    return f"{_repo_key_prefix(prefix, repo)}:{source_digest}:{index:04d}"
+    return f"{_source_key_prefix(prefix, repo, source)}{index:04d}"
+
+
+def stale_keys(
+    vectors: Sequence[dict[str, Any]], source_prefix: str, keep: set[str]
+) -> list[str]:
+    """返回属于该来源、但不在本次保留集合中的旧主键."""
+    result: list[str] = []
+    for vector in vectors:
+        key = vector.get("key")
+        if isinstance(key, str) and key.startswith(source_prefix) and key not in keep:
+            result.append(key)
+    return result
 
 
 def _base_metadata(options: IngestOptions, source: str) -> dict[str, Any]:
@@ -716,6 +861,11 @@ def run_ingest(inputs: Sequence[str], options: IngestOptions) -> tuple[int, int]
                 f"[dry-run] {chunk.key}\t{len(chunk.text)} chars\t"
                 f"{chunk.metadata.get('source', '')}"
             )
+        if options.prune:
+            print(
+                "[dry-run] --prune 需要在线执行，已跳过远端检查",
+                file=sys.stderr,
+            )
         return len(chunks), 0
 
     written = 0
@@ -740,6 +890,26 @@ def run_ingest(inputs: Sequence[str], options: IngestOptions) -> tuple[int, int]
         written += len(pending)
         if not options.quiet:
             print(f"[write] 已写入 {written}/{len(chunks)}", file=sys.stderr)
+
+    if options.prune:
+        keep_by_source: dict[str, set[str]] = {}
+        for chunk in chunks:
+            source = chunk.metadata.get("source")
+            if isinstance(source, str) and source:
+                keep_by_source.setdefault(source, set()).add(chunk.key)
+        removed = prune_sources(
+            options.oss,
+            options.oss.index,
+            options.repo,
+            options.key_prefix,
+            keep_by_source,
+        )
+        for source, count in sorted(removed.items()):
+            if count and not options.quiet:
+                print(
+                    f"[prune] {source}: 删除 {count} 条旧切片",
+                    file=sys.stderr,
+                )
     return len(chunks), written
 
 
@@ -800,17 +970,38 @@ def _build_options(args: argparse.Namespace) -> IngestOptions:
 
     list_mode = bool(getattr(args, "list_repos", False))
     delete_mode = bool(getattr(args, "delete", False))
+    check_mode = bool(getattr(args, "check", False))
+    if check_mode and (
+        list_mode
+        or delete_mode
+        or args.query
+        or args.all_repos
+        or args.inputs
+        or args.prune
+        or args.repo
+    ):
+        raise IngestError("--check 不能与其它操作或输入混用")
+    if check_mode and args.dry_run:
+        raise IngestError("--check 不需要 --dry-run")
     if list_mode and (
         delete_mode or args.query or args.repo or args.all_repos or args.inputs
     ):
         raise IngestError("--list-repos 不能与其它操作或输入混用")
-    if delete_mode and (list_mode or args.query or args.all_repos or args.inputs):
-        raise IngestError("--delete 只能与 --repo 搭配使用")
+    if delete_mode and (
+        list_mode or args.query or args.all_repos or args.inputs or args.prune
+    ):
+        raise IngestError("--delete 只能与 --repo / --source 搭配使用")
     if delete_mode and not args.repo:
         raise IngestError("--delete 必须显式指定 --repo，避免误删")
+    if args.source and not delete_mode:
+        raise IngestError("--source 只能与 --delete 搭配使用")
+    if args.yes and not delete_mode:
+        raise IngestError("--yes 只能与 --delete 搭配使用")
+    if args.prune and (args.query or list_mode or delete_mode):
+        raise IngestError("--prune 只能用于写入模式")
 
-    needs_oss = list_mode or delete_mode or not args.dry_run
-    needs_dashscope = not (list_mode or delete_mode) and not args.dry_run
+    needs_oss = check_mode or list_mode or delete_mode or not args.dry_run
+    needs_dashscope = not (list_mode or delete_mode or check_mode) and not args.dry_run
     if needs_oss:
         missing = [
             name
@@ -843,7 +1034,7 @@ def _build_options(args: argparse.Namespace) -> IngestOptions:
         raise IngestError("retries 不能为负数")
 
     repo: str | None
-    if list_mode:
+    if check_mode or list_mode:
         repo = ""
     elif delete_mode:
         repo = normalize_repo(args.repo)
@@ -894,6 +1085,7 @@ def _build_options(args: argparse.Namespace) -> IngestOptions:
         tags=args.tag,
         dry_run=args.dry_run,
         quiet=args.quiet,
+        prune=args.prune,
     )
 
 
@@ -918,9 +1110,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="列出各仓库的向量数量（仓库级审计）",
     )
     parser.add_argument(
+        "--check",
+        action="store_true",
+        help="检查 OSS 凭证与 Bucket/索引是否可访问",
+    )
+    parser.add_argument(
         "--delete",
         action="store_true",
-        help="删除 --repo 指定仓库的全部向量；建议先加 --dry-run 预览",
+        help="删除 --repo 指定仓库的向量；非 dry-run 时必须加 --yes",
+    )
+    parser.add_argument(
+        "--source",
+        default="",
+        help="与 --delete 搭配，只删除该文件来源的默认主键向量",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="确认不可逆删除（与 --delete 搭配）",
+    )
+    parser.add_argument(
+        "--prune",
+        action="store_true",
+        help="写入后删除同来源中已不存在的旧切片（dry-run 跳过远端检查）",
     )
     parser.add_argument(
         "--repo",
@@ -1005,23 +1217,49 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="只展示切片计划，不调用任何 API"
     )
     parser.add_argument("--quiet", action="store_true", help="减少进度输出")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="错误信息中包含响应体与 message（可能含敏感内容）",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     """脚本入口：解析参数并执行导入、检索、审计或清理."""
     args = build_parser().parse_args(argv)
+    _set_debug_errors(bool(args.debug))
     try:
         if args.query and args.inputs:
             raise IngestError("--query 与输入文件不能同时使用")
         if args.query and args.dry_run:
             raise IngestError("--query 不支持 --dry-run")
-        if not (args.query or args.list_repos or args.delete) and not args.inputs:
+        if (
+            not (
+                args.query
+                or args.list_repos
+                or args.delete
+                or args.check
+                or args.source
+                or args.yes
+            )
+            and not args.inputs
+        ):
             raise IngestError(
-                "请提供输入文件，或使用 --query / --list-repos / --delete"
+                "请提供输入文件，或使用 --query / --list-repos / --delete / --check"
             )
 
         options = _build_options(args)
+        if args.check:
+            probe_index(options.oss, options.oss.index)
+            print(f"OK: {options.oss.bucket}/{options.oss.index} 可访问")
+            if not options.dashscope_api_key:
+                print(
+                    "提示: DASHSCOPE_API_KEY 未设置（写入/检索前需要）",
+                    file=sys.stderr,
+                )
+            return 0
+
         if args.list_repos:
             counts = list_repo_counts(options.oss, options.oss.index)
             if args.json:
@@ -1037,17 +1275,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.delete:
-            count = delete_repo(
-                options.oss, options.oss.index, options.repo, args.dry_run
-            )
+            if not args.dry_run and not args.yes:
+                raise IngestError(
+                    "--delete 会不可逆删除，请加 --yes 确认（或先用 --dry-run 预览）"
+                )
+            if args.source:
+                source = _source_label(Path(args.source))
+                count = delete_source(
+                    options.oss,
+                    options.oss.index,
+                    options.repo,
+                    options.key_prefix,
+                    source,
+                    args.dry_run,
+                )
+                label = f"repo={options.repo}, source={source}"
+            else:
+                count = delete_repo(
+                    options.oss, options.oss.index, options.repo, args.dry_run
+                )
+                label = f"repo={options.repo}"
             if args.dry_run:
                 print(
-                    f"[dry-run] 将删除 {count} 条向量（repo={options.repo}）",
+                    f"[dry-run] 将删除 {count} 条向量（{label}）",
                     file=sys.stderr,
                 )
             else:
                 print(
-                    f"已删除 {count} 条向量（repo={options.repo}）",
+                    f"已删除 {count} 条向量（{label}）",
                     file=sys.stderr,
                 )
             return 0

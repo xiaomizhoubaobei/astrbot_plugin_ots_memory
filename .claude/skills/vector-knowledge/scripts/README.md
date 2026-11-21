@@ -26,6 +26,14 @@ export OSS_VECTOR_ACCOUNT_ID="<阿里云账号 ID>"           # 也可用 --acco
 可选环境变量：`OSS_VECTOR_BUCKET`、`OSS_VECTOR_INDEX`、`OSS_VECTOR_REGION`、
 `OSS_VECTOR_ENDPOINT`；命令行参数优先级更高。
 
+### 自检
+
+```bash
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py --check
+```
+
+用一次 `ListVectors` 探针验证 OSS 凭证、Bucket 与索引是否可访问；不调用百炼，也不写入。
+
 ### 基本用法
 
 ```bash
@@ -46,6 +54,9 @@ python .claude/skills/vector-knowledge/scripts/vector_ingest.py \
   --chunk-size 800 --chunk-overlap 100 \
   --embed-batch-size 10 --vector-batch-size 100 \
   docs/
+
+# 6. 写入并清理同来源中已不存在的旧切片
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py --prune docs/
 ```
 
 ### 仓库隔离
@@ -87,13 +98,22 @@ python .claude/skills/vector-knowledge/scripts/vector_ingest.py --list-repos --j
 # 预览某仓库将被删除的向量数量（不实际删除）
 python .claude/skills/vector-knowledge/scripts/vector_ingest.py --delete --repo XMZZUZHI/Astrbot/astrbot_plugin_ots_memory --dry-run
 
-# 删除某仓库的全部向量（不可恢复）
-python .claude/skills/vector-knowledge/scripts/vector_ingest.py --delete --repo XMZZUZHI/Astrbot/astrbot_plugin_ots_memory
+# 删除某仓库的全部向量（不可恢复，必须加 --yes）
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py --delete --repo XMZZUZHI/Astrbot/astrbot_plugin_ots_memory --yes
+
+# 只删除某个来源的默认主键
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py --delete \
+  --repo XMZZUZHI/Astrbot/astrbot_plugin_ots_memory \
+  --source docs/05-troubleshooting.md --dry-run
+python .claude/skills/vector-knowledge/scripts/vector_ingest.py --delete \
+  --repo XMZZUZHI/Astrbot/astrbot_plugin_ots_memory \
+  --source docs/05-troubleshooting.md --yes
 ```
 
 - `--list-repos` 只需要 OSS 凭证，不要求 `DASHSCOPE_API_KEY`；
 - `--delete` 必须显式提供 `--repo`，不能与 `--all-repos` 或输入文件混用；
-- 删除前建议先加 `--dry-run` 核对数量。
+- 非 dry-run 的删除必须加 `--yes`；删除前先加 `--dry-run` 核对数量；
+- `--source` 只删除该来源的默认主键，自定义 JSONL `key` 不受影响。
 
 ### 检索
 
@@ -122,9 +142,20 @@ python .claude/skills/vector-knowledge/scripts/vector_ingest.py --query "端口�
 ### 主键与幂等
 
 文本文件的向量主键为 `cnb:<仓库哈希>:<来源路径哈希>:<切片序号>`。对同一仓库、
-同一来源重复导入会**覆盖**相同序号的向量；若文件变短导致切片数减少，旧的多余
-切片不会自动删除，需要按主键另行清理。JSONL 的 `key` 字段会被自动加上仓库
-命名空间前缀，避免跨仓库覆盖。
+同一来源重复导入会**覆盖**相同序号的向量。若文件变短导致切片数减少，旧的多余
+切片不会自动删除：
+
+- 写入时加 `--prune`，删除同来源中已不存在的默认主键；
+- 或用 `--delete --repo ... --source <路径>` 只清理该来源。
+
+JSONL 的 `key` 字段会被自动加上仓库命名空间前缀，避免跨仓库覆盖；自定义 key
+不在来源前缀下，因此不会被 `--prune` 或 `--source` 删除。
+
+### 错误与调试
+
+- 默认错误信息只包含 HTTP 状态、业务 code 与 request_id，不回显响应体；
+- `--debug` 才会附带 message 与最多 1200 字符的响应体，可能含知识库正文，不要在共享日志中开启；
+- 429/5xx 会按指数退避重试，其余错误直接退出。
 
 ### 限制
 
