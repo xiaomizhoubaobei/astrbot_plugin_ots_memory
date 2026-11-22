@@ -29,18 +29,13 @@ $:
                 script:
                   - curl -fsSL https://qoder.com/install | bash
                   - echo "Qoder CLI安装完成"
-              # 安装 Snyk CLI：官方独立二进制 + GPG 验签 + SHA-256 校验。
-              # 具体校验与安装步骤见 scripts/install_snyk_cli.sh，避免 .cnb.yml 过长。
-              - name: 安装Snyk CLI（校验签名后安装）
-                script:
-                    - chmod +x /workspace/scripts/install_snyk_cli.sh
-                    - /workspace/scripts/install_snyk_cli.sh
-              # 为 Claude Code 配置 Snyk Studio（MCP + 安全钩子 + 修复命令）。
+              # 安装 Snyk CLI（官方独立二进制 + GPG 验签 + SHA-256 校验），
+              # 并为 Claude Code 配置 Snyk Studio（MCP + 安全钩子 + 修复命令）。
               # 有 SNYK_TOKEN 时自动认证；否则新会话里按 MCP 提示完成 snyk auth。
-              - name: 安装Snyk Studio（Claude Code）
+              - name: 安装Snyk CLI与Studio
                 script:
-                    - chmod +x /workspace/scripts/install_snyk_studio.sh
-                    - /workspace/scripts/install_snyk_studio.sh
+                    - chmod +x /workspace/scripts/install_snyk.sh
+                    - /workspace/scripts/install_snyk.sh
               - name: 安装sudo更新APT源
                 script:
                     - sudo apt-get update
