@@ -35,6 +35,12 @@ $:
                 script:
                     - chmod +x /workspace/scripts/install_snyk_cli.sh
                     - /workspace/scripts/install_snyk_cli.sh
+              # 为 Claude Code 配置 Snyk Studio（MCP + 安全钩子 + 修复命令）。
+              # 有 SNYK_TOKEN 时自动认证；否则新会话里按 MCP 提示完成 snyk auth。
+              - name: 安装Snyk Studio（Claude Code）
+                script:
+                    - chmod +x /workspace/scripts/install_snyk_studio.sh
+                    - /workspace/scripts/install_snyk_studio.sh
               - name: 安装sudo更新APT源
                 script:
                     - sudo apt-get update
